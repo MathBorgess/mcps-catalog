@@ -25,8 +25,12 @@ PLUGIN_JSON = REPO_ROOT / "ultrafast-browser" / ".claude-plugin" / "plugin.json"
 SUBMODULE_PATH = "ultrafast-browser/upstream"
 SUBMODULE_DIR = REPO_ROOT / SUBMODULE_PATH
 
-# Matches "git+https://github.com/MathBorgess/ultrafast-browser-mcp@<sha>" and captures <sha>.
-PIN_RE = re.compile(r"git\+https://github\.com/MathBorgess/ultrafast-browser-mcp@([0-9a-fA-F]{7,40})")
+# Matches "git+https://github.com/MathBorgess/ultrafast-browser-mcp@<sha>" and captures <sha>,
+# whatever its length/case — pinned_sha() below validates it's a full 40-char lowercase sha,
+# so an abbreviated or mixed-case pin gets a clear, specific error instead of silently being
+# treated as "no pin found" or (worse) compared unequal to a full sha without explanation.
+PIN_RE = re.compile(r"git\+https://github\.com/MathBorgess/ultrafast-browser-mcp@([0-9a-zA-Z]+)")
+FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class CheckError(Exception):
@@ -53,7 +57,15 @@ def pinned_sha() -> str:
     for arg in args:
         match = PIN_RE.search(str(arg))
         if match:
-            return match.group(1).lower()
+            sha = match.group(1)
+            if not FULL_SHA_RE.fullmatch(sha):
+                raise CheckError(
+                    f"{PLUGIN_JSON} pins {sha!r}, which is not a full 40-char lowercase sha — "
+                    "abbreviated or mixed-case shas are not allowed; pin must be the full "
+                    "40-char sha (get it with `git -C ultrafast-browser/upstream rev-parse "
+                    "HEAD`)"
+                )
+            return sha
 
     raise CheckError(
         f"{PLUGIN_JSON} mcpServers.ultrafast-browser.args has no "

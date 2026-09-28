@@ -38,4 +38,7 @@ the upstream package straight from that Git ref, so cloning the submodule is nev
 1. `git -C ultrafast-browser/upstream fetch && git -C ultrafast-browser/upstream checkout <new sha>` (or `git
    submodule update --remote ultrafast-browser/upstream`), then `git add ultrafast-browser/upstream`.
 2. Update the sha in the `uvx --from git+...@<sha>` arg in `ultrafast-browser/.claude-plugin/plugin.json` to match.
-3. Run `python3 scripts/check_pins.py` — it fails if the two shas disagree. CI runs the same check on every PR.
+   **Use the full sha** — `git -C ultrafast-browser/upstream rev-parse HEAD` — never an abbreviated (short) sha;
+   `check_pins.py` rejects anything shorter than the full 40 characters.
+3. Run `python3 scripts/check_pins.py` — it fails if the two shas disagree, or if the pinned sha isn't the full
+   40-char sha. CI runs the same check on every PR.

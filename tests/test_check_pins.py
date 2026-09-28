@@ -67,11 +67,30 @@ def _write_plugin_json(path: Path, sha: str) -> None:
 # ---- pinned_sha() ----
 
 
-def test_pinned_sha_reads_the_pin(cp, tmp_path):
+FULL_SHA = "094f9aa1a6ae2409ba9345b9afffaf80707250ef"
+
+
+def test_pinned_sha_reads_a_full_sha_pin(cp, tmp_path):
     plugin_json = tmp_path / "plugin.json"
-    _write_plugin_json(plugin_json, "abc1234")
+    _write_plugin_json(plugin_json, FULL_SHA)
     cp.PLUGIN_JSON = plugin_json
-    assert cp.pinned_sha() == "abc1234"
+    assert cp.pinned_sha() == FULL_SHA
+
+
+def test_pinned_sha_rejects_abbreviated_sha(cp, tmp_path):
+    plugin_json = tmp_path / "plugin.json"
+    _write_plugin_json(plugin_json, "abc1234")  # 7 chars — a valid, but abbreviated, sha
+    cp.PLUGIN_JSON = plugin_json
+    with pytest.raises(cp.CheckError, match="full 40-char"):
+        cp.pinned_sha()
+
+
+def test_pinned_sha_rejects_uppercase_sha(cp, tmp_path):
+    plugin_json = tmp_path / "plugin.json"
+    _write_plugin_json(plugin_json, FULL_SHA.upper())
+    cp.PLUGIN_JSON = plugin_json
+    with pytest.raises(cp.CheckError, match="full 40-char"):
+        cp.pinned_sha()
 
 
 def test_pinned_sha_missing_file_raises(cp, tmp_path):
