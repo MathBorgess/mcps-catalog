@@ -7,6 +7,7 @@ the stop() test, a threading.Event the fake player blocks on.
 """
 
 import os
+import subprocess
 import threading
 import time
 
@@ -291,6 +292,65 @@ def test_subprocess_player_stop_without_active_process_is_a_noop():
     player.stop()  # must not raise, even though nothing has ever played
 
 
+def test_subprocess_player_stop_terminates_process_created_concurrently(monkeypatch):
+    """Regression for the play_file/stop race (F1): Popen() creation and
+    registering self._proc must be atomic under the lock, so a stop() that
+    runs concurrently with play_file can never observe a stale/None _proc
+    and let the just-started process run to completion unstoppably.
+
+    subprocess.Popen is monkeypatched with a fake that blocks inside the
+    "Popen call" until the test releases it, simulating the exact window
+    stop() must not be able to sneak through. Never spawns a real process.
+    """
+    popen_entered = threading.Event()
+    release_popen = threading.Event()
+    created: list["FakeProc"] = []
+
+    class FakeProc:
+        def __init__(self):
+            self.terminated = threading.Event()
+
+        def wait(self):
+            self.terminated.wait(timeout=2.0)
+
+        def poll(self):
+            return None if not self.terminated.is_set() else -15
+
+        def terminate(self):
+            self.terminated.set()
+
+    def fake_popen(args, **kwargs):
+        popen_entered.set()
+        # Held here to simulate the gap between the process existing and
+        # self._proc being set. With Popen()+registration atomic under the
+        # lock, a concurrent stop() blocks on that same lock and can only
+        # proceed once this call (and the registration) has completed.
+        release_popen.wait(timeout=2.0)
+        proc = FakeProc()
+        created.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    player = SubprocessPlayer(which=lambda name: "/bin/afplay")
+
+    play_thread = threading.Thread(target=player.play_file, args=("clip.wav",))
+    play_thread.start()
+    assert popen_entered.wait(timeout=1.0), "play_file never reached Popen()"
+
+    stop_thread = threading.Thread(target=player.stop)
+    stop_thread.start()
+    time.sleep(0.05)  # give stop() a chance to actually block on the lock
+    release_popen.set()
+
+    play_thread.join(timeout=2.0)
+    stop_thread.join(timeout=2.0)
+
+    assert not play_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert len(created) == 1
+    assert created[0].terminated.is_set(), "stop() must terminate the process play_file just created"
+
+
 # -- TelegramSink: note-first, ordering ---------------------------------------
 
 
@@ -373,15 +433,44 @@ def test_telegram_duration_floor_is_one_second():
 # -- TelegramSink: chunked synth concatenation ---------------------------------
 
 
+class GrowingSynth:
+    """Returns a distinct, increasing sample count per call (1000, 2000, ...)
+    so a concatenation bug that keeps only the first or last chunk yields a
+    different, easily distinguishable duration than the correct total."""
+
+    def __init__(self, sr: int = SR):
+        self.calls: list[str] = []
+        self._sr = sr
+
+    def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
+        self.calls.append(text)
+        n = 1000 * len(self.calls)
+        return np.zeros(n, dtype=np.float32), self._sr
+
+
 def test_telegram_concatenates_multiple_chunks():
     long_text = ("frase numero um muito comprida " * 15).strip() + ". " + \
                 ("frase numero dois tambem comprida " * 15).strip() + "."
-    synth = FakeSynth(n_samples=5)
+    synth = GrowingSynth()
     sender = FakeSender()
     sink = TelegramSink(synth, sender)
     result = sink.play([Clip(text=long_text)], voice=None)
     assert result.clips[0].ok is True
     assert len(synth.calls) >= 2  # text was chunked and synthesized piece by piece
+
+    # The reported seconds/duration must reflect the full concatenation of
+    # every chunk's distinct sample count, not just the first or last chunk.
+    expected_samples = sum(1000 * (i + 1) for i in range(len(synth.calls)))
+    expected_seconds = expected_samples / SR
+    assert result.clips[0].seconds == pytest.approx(expected_seconds)
+    _, _, duration = sender.voices[0]
+    assert duration == max(1, round(expected_seconds))
+    # Sanity: a first-chunk-only or last-chunk-only regression would produce
+    # a smaller, different duration than the true sum -- pin that down too.
+    first_chunk_only_seconds = 1000 / SR
+    last_chunk_only_seconds = (1000 * len(synth.calls)) / SR
+    assert expected_seconds != first_chunk_only_seconds
+    assert expected_seconds != last_chunk_only_seconds
 
 
 # -- TelegramSink: stop() -------------------------------------------------------

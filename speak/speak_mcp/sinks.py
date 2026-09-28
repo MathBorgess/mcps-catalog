@@ -90,8 +90,18 @@ class SubprocessPlayer:
 
     def play_file(self, path: str) -> None:
         binary = self._resolve()
-        proc = subprocess.Popen([binary, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Popen() and registering self._proc happen under the same lock a
+        # concurrent stop() also acquires, so process creation is atomic
+        # with becoming visible to stop(): there is no window in which a
+        # process exists but self._proc doesn't reflect it yet, so stop()
+        # can never observe a stale/None _proc while this process is live.
         with self._lock:
+            proc = subprocess.Popen(
+                [binary, path],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             self._proc = proc
         try:
             proc.wait()
