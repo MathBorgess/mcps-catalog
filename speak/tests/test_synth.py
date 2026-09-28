@@ -200,6 +200,19 @@ def test_ensure_models_skips_files_already_correct_size(tmp_path):
     ensure_models(settings, fetch=fake_fetch)
 
 
+def test_ensure_models_wraps_mkdir_failure_in_config_error(tmp_path, monkeypatch):
+    settings = Settings.from_env({"SPEAK_HOME": str(tmp_path)})
+
+    def fake_mkdir(self, *a, **kw):
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+
+    with pytest.raises(ConfigError) as exc:
+        ensure_models(settings, fetch=lambda url, dest_path: pytest.fail("fetch should not run"))
+    assert "model directory" in str(exc.value)
+
+
 # -- KokoroSynth ---------------------------------------------------------
 
 

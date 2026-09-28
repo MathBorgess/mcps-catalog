@@ -10,6 +10,7 @@ dependencies = [
     "soundfile==0.14.0",
     "mcp==2.2.0",
     "httpx==0.28.1",
+    "pydantic>=2.12",
 ]
 
 [project.scripts]

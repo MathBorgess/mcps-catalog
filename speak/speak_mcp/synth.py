@@ -110,7 +110,10 @@ def _download(url: str, dest_path: Path) -> None:
 
 
 def ensure_models(settings: Settings, fetch: Callable[[str, Path], None] = _download) -> None:
-    settings.model_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        settings.model_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigError(f"cannot create model directory {settings.model_path.parent}: {exc}") from exc
     for name, size in MODEL_SIZES.items():
         dest = settings.home / "models" / name
         if dest.is_file() and dest.stat().st_size == size:
