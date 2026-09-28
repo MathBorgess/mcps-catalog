@@ -65,6 +65,10 @@ def make_sink() -> LocalSink | TelegramSink:
     the same local player across calls. Monkeypatchable in tests."""
     global _sink
     if _sink is None:
+        # Cheap, no I/O: check SPEAK_SINK *before* paying for a model
+        # download/ONNX init, so a typo'd SPEAK_SINK surfaces as its own
+        # ConfigError instead of a confusing model error.
+        kind = choose_sink()
         # Build/fetch the synth *before* taking _lock: make_synth() takes the
         # same lock itself, and a plain Lock is not reentrant, so calling it
         # from inside `with _lock:` below would deadlock this thread against
@@ -72,7 +76,6 @@ def make_sink() -> LocalSink | TelegramSink:
         synth = make_synth()
         with _lock:
             if _sink is None:
-                kind = choose_sink()
                 if kind == "local":
                     _sink = LocalSink(synth)
                 else:

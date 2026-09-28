@@ -372,6 +372,28 @@ def test_make_sink_does_not_deadlock_on_first_real_call(monkeypatch):
     assert isinstance(outcome["sink"], server.LocalSink)
 
 
+def test_speak_invalid_speak_sink_never_builds_synth(monkeypatch):
+    """Regression (fix round 2): make_sink() must check choose_sink() --
+    cheap, env-only -- *before* calling make_synth() -- a full model
+    download/ONNX init. Otherwise a typo'd SPEAK_SINK pays for a model build
+    first and its ConfigError would surface as a confusing model error
+    instead of the actual SPEAK_SINK message. Uses the real choose_sink()
+    (via SPEAK_SINK in the environment) and the real make_sink(), with
+    make_synth stubbed to blow up if it is ever reached."""
+    monkeypatch.setattr(server, "_sink", None)
+    monkeypatch.setattr(server, "_synth", None)
+    monkeypatch.setenv("SPEAK_SINK", "carrier-pigeon")
+
+    def _boom():
+        raise AssertionError("make_synth() must not be called for an invalid SPEAK_SINK")
+
+    monkeypatch.setattr(server, "make_synth", _boom)
+
+    res = _call("speak", {"text": "ola"})
+    assert res.structured_content["ok"] is False
+    assert "SPEAK_SINK" in res.structured_content["message"]
+
+
 # -- voice validation (F3): unknown voice must never reach the sink -----------
 
 
