@@ -131,7 +131,11 @@ class LocalSink:
         self._worker = threading.Thread(target=self._run, name="speak-mcp-local-sink", daemon=True)
         self._worker.start()
 
-    def play(self, clips: list[Clip], voice: str | None) -> SpeakResult:
+    def play(self, clips: list[Clip], voice: str | None, note: str | None = None) -> SpeakResult:
+        # `note` is part of the uniform Sink interface (TelegramSink sends it
+        # as a leading plain-text message) but local playback has nothing
+        # analogous to send it as, so it is accepted and ignored here.
+        del note
         results = []
         for i, clip in enumerate(clips):
             self._queue.put((clip, voice))

@@ -9,14 +9,19 @@ it never plays audio (no `--say`) and only checks the handshake response.
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
+import threading
+from pathlib import Path
 
 import pytest
 
 from speak_mcp import server
+from speak_mcp import sinks as sinks_module
 from speak_mcp.errors import ConfigError
 from speak_mcp.sinks import ClipResult, SpeakResult
+from speak_mcp.synth import MODEL, VOICES_FILE
 
 
 class FakeSink:
@@ -36,6 +41,20 @@ class FakeSink:
     def stop(self):
         self.stop_calls += 1
         return SpeakResult(ok=True, sink=self.sink_name, message="stopped")
+
+
+class FakeSynth:
+    """Exposes just enough of KokoroSynth's surface for voice validation
+    (lang_for is a free function in synth.py, exercised directly)."""
+
+    def __init__(self, voices=("pf_dora", "af_heart", "bf_alice")):
+        self._voices = list(voices)
+
+    def voices(self):
+        return self._voices
+
+
+DEFAULT_SYNTH = FakeSynth()
 
 
 def _call(tool_name: str, args: dict):
@@ -84,6 +103,7 @@ def test_speak_stop_schema_has_no_fields():
 def test_speak_happy_path(monkeypatch):
     fake = FakeSink()
     monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
     res = _call("speak", {"text": "ola mundo", "title": "titulo", "voice": "pf_dora"})
     assert res.is_error is False
     assert res.structured_content["ok"] is True
@@ -111,6 +131,7 @@ def test_speak_defaults_title_and_voice_to_none(monkeypatch):
 def test_speak_clips_happy_path(monkeypatch):
     fake = FakeSink()
     monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
     res = _call("speak_clips", {
         "clips": [{"text": "um"}, {"text": "dois", "caption": "c2"}],
         "note": "nota",
@@ -290,6 +311,123 @@ def test_make_sink_builds_local_sink_via_make_synth(monkeypatch):
     assert len(built) == 1
 
 
+def test_make_sink_does_not_deadlock_on_first_real_call(monkeypatch):
+    """Regression for F1: make_sink() used to acquire `_lock` and then call
+    make_synth() -- which acquires the *same* plain (non-reentrant) Lock --
+    from inside that `with` block. Same thread, same lock, twice: deadlock,
+    on the very first real tool call of every fresh process.
+
+    This exercises the real make_synth()/make_sink() (not monkeypatched
+    stand-ins for them), stubbing only the leaves they call out to: model
+    settings/download/init, and the local player class (so nothing can ever
+    actually play). Runs the call on a background thread with a timeout: if
+    the deadlock regresses, that thread is still alive after 5s and the
+    assertion fails instead of the test hanging forever.
+    """
+    monkeypatch.setattr(server, "_synth", None)
+    monkeypatch.setattr(server, "_sink", None)
+    monkeypatch.setattr(server, "choose_sink", lambda: "local")
+
+    class FakeSettings:
+        pass
+
+    monkeypatch.setattr(server, "Settings",
+                         type("FakeSettingsCls", (), {"from_env": classmethod(lambda cls: FakeSettings())}))
+    monkeypatch.setattr(server, "ensure_models", lambda settings: None)
+
+    class FakeKokoroSynth:
+        def __init__(self, settings):
+            self._settings = settings
+
+        def voices(self):
+            return []
+
+    monkeypatch.setattr(server, "KokoroSynth", FakeKokoroSynth)
+
+    class NoOpPlayer:
+        """LocalSink's default player, replaced so nothing can ever play."""
+
+        def play_file(self, path):
+            raise AssertionError("must never play audio during this test")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(sinks_module, "SubprocessPlayer", NoOpPlayer)
+
+    outcome: dict = {}
+
+    def _call_make_sink():
+        try:
+            outcome["sink"] = server.make_sink()
+        except Exception as exc:  # captured, not raised, so the thread always exits cleanly
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_call_make_sink, daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive(), "make_sink() deadlocked (F1 regression)"
+    assert "error" not in outcome, f"make_sink() raised: {outcome.get('error')!r}"
+    assert isinstance(outcome["sink"], server.LocalSink)
+
+
+# -- voice validation (F3): unknown voice must never reach the sink -----------
+
+
+def test_speak_unknown_voice_prefix_is_validation_failure(monkeypatch):
+    fake = FakeSink()
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
+    res = _call("speak", {"text": "ola", "voice": "qq_bogus"})
+    assert res.structured_content["ok"] is False
+    assert "voice" in res.structured_content["message"]
+    assert fake.play_calls == []
+
+
+def test_speak_voice_not_in_loaded_voices_is_validation_failure(monkeypatch):
+    fake = FakeSink()
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)  # "pz_unknown" isn't in it
+    res = _call("speak", {"text": "ola", "voice": "pz_unknown"})
+    assert res.structured_content["ok"] is False
+    assert "unknown voice" in res.structured_content["message"]
+    assert fake.play_calls == []
+
+
+def test_speak_clips_unknown_voice_is_validation_failure(monkeypatch):
+    fake = FakeSink()
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
+    res = _call("speak_clips", {"clips": [{"text": "ola"}], "voice": "zz_unknown"})
+    assert res.structured_content["ok"] is False
+    assert fake.play_calls == []
+
+
+def test_speak_known_voice_passes_validation(monkeypatch):
+    fake = FakeSink()
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
+    res = _call("speak", {"text": "ola", "voice": "af_heart"})
+    assert res.structured_content["ok"] is True
+    assert len(fake.play_calls) == 1
+
+
+def test_speak_no_explicit_voice_skips_validation_entirely(monkeypatch):
+    """When the caller doesn't override the voice, the server must not force
+    a make_synth() build just to validate it (that would mean every call
+    pays for model loading, defeating the point of lazy construction)."""
+    fake = FakeSink()
+
+    def _boom():
+        raise AssertionError("make_synth() must not be called when voice is None")
+
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", _boom)
+    res = _call("speak", {"text": "ola"})
+    assert res.structured_content["ok"] is True
+
+
 # -- stdio initialize handshake (real subprocess, real protocol) --------------
 
 
@@ -358,6 +496,104 @@ def test_stdio_server_writes_only_protocol_to_stdout():
         assert readable, "server never responded"
         line = proc.stdout.readline()
         json.loads(line)  # must parse cleanly as the only thing on stdout
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+# -- F4: real model load must never leak a stray print onto stdout ------------
+
+
+REAL_SPEAK_HOME = os.environ.get("SPEAK_HOME", "/opt/speak")
+
+
+def _jsonrpc_send(stdin, obj: dict) -> None:
+    stdin.write(json.dumps(obj) + "\n")
+    stdin.flush()
+
+
+def _jsonrpc_read_until_id(stdout, target_id: int, timeout: float) -> list[dict]:
+    """Reads lines until one has `"id" == target_id`, or times out. Every
+    line read must parse as JSON-RPC (`jsonrpc` key present) -- a stray print
+    from a C-extension library during model load would break that
+    immediately, with the offending raw line in the assertion message."""
+    import select
+    import time
+
+    messages = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        readable, _, _ = select.select([stdout], [], [], remaining)
+        if not readable:
+            break
+        raw = stdout.readline()
+        if not raw:
+            break
+        parsed = json.loads(raw)  # AssertionError-equivalent: raises on a stray non-JSON print
+        assert parsed.get("jsonrpc") == "2.0", f"non-protocol line on stdout: {raw!r}"
+        messages.append(parsed)
+        if parsed.get("id") == target_id:
+            return messages
+    raise AssertionError(f"never saw a response with id={target_id} within {timeout}s; "
+                          f"got: {messages}")
+
+
+@pytest.mark.skipif(
+    not (Path(REAL_SPEAK_HOME, "models", MODEL).exists()
+         and Path(REAL_SPEAK_HOME, "models", VOICES_FILE).exists()),
+    reason="Kokoro model not installed under SPEAK_HOME",
+)
+def test_stdio_stays_protocol_clean_through_real_model_load_telegram_sink():
+    """F4: starts the real stdio server with SPEAK_SINK=telegram and bogus
+    TELEGRAM_* credentials, completes initialize, then calls speak_stop.
+    speak_stop routes through the real make_sink() -> make_synth() ->
+    KokoroSynth(settings), so this loads the real ONNX model -- exactly the
+    scenario where a C-extension (onnxruntime/kokoro) could print a stray
+    line onto stdout and corrupt the MCP protocol stream. TelegramSink.stop()
+    itself is a pure no-op (never calls the Telegram API), so this never
+    touches the network, and nothing here ever plays audio.
+    """
+    env = dict(os.environ)
+    env["SPEAK_HOME"] = REAL_SPEAK_HOME
+    env["SPEAK_SINK"] = "telegram"
+    env["TELEGRAM_BOT_TOKEN"] = "bogus-token-never-used"
+    env["TELEGRAM_CHAT_ID"] = "bogus-chat-never-used"
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "speak_mcp"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=env,
+    )
+    try:
+        _jsonrpc_send(proc.stdin, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2026-07-28", "capabilities": {},
+                       "clientInfo": {"name": "f4-test", "version": "0.0.1"}},
+        })
+        init_messages = _jsonrpc_read_until_id(proc.stdout, target_id=1, timeout=15.0)
+        assert "result" in init_messages[-1], init_messages[-1]
+
+        _jsonrpc_send(proc.stdin, {"jsonrpc": "2.0", "method": "notifications/initialized",
+                                    "params": {}})
+
+        _jsonrpc_send(proc.stdin, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "speak_stop", "arguments": {}},
+        })
+        # Generous timeout: this is a real model load (ONNX session init), not a fake.
+        call_messages = _jsonrpc_read_until_id(proc.stdout, target_id=2, timeout=60.0)
+        call_response = call_messages[-1]
+        assert "result" in call_response, call_response
+        structured = call_response["result"].get("structuredContent")
+        assert structured is not None, call_response
+        assert structured["ok"] is True
+        assert structured["sink"] == "telegram"
+        assert structured["message"] == "nothing to stop on telegram"
     finally:
         proc.terminate()
         try:

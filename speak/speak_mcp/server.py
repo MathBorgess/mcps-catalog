@@ -6,7 +6,6 @@ first use) so the server starts fine without models or env configured.
 """
 
 import asyncio
-import inspect
 import threading
 
 from mcp.server.mcpserver import MCPServer
@@ -22,7 +21,7 @@ from speak_mcp.clips import (
 )
 from speak_mcp.errors import ConfigError
 from speak_mcp.sinks import LocalSink, SpeakResult, TelegramSink, choose_sink
-from speak_mcp.synth import KokoroSynth, Settings, ensure_models
+from speak_mcp.synth import KokoroSynth, Settings, ensure_models, lang_for
 from speak_mcp.telegram import Telegram
 
 INSTRUCTIONS = """\
@@ -39,6 +38,11 @@ cloud sessions it arrives as a voice message on the owner's Telegram instead.
 
 srv = MCPServer("speak", instructions=INSTRUCTIONS)
 
+# Both make_synth() and make_sink() guard their own singleton with this same
+# lock. It is a plain (non-reentrant) Lock, so make_sink() must never call
+# make_synth() while holding it -- that would be the same thread trying to
+# acquire the lock twice and deadlock on the very first real tool call. See
+# the ordering note in make_sink() below (regression: F1).
 _lock = threading.Lock()
 _synth: KokoroSynth | None = None
 _sink: LocalSink | TelegramSink | None = None
@@ -61,10 +65,14 @@ def make_sink() -> LocalSink | TelegramSink:
     the same local player across calls. Monkeypatchable in tests."""
     global _sink
     if _sink is None:
+        # Build/fetch the synth *before* taking _lock: make_synth() takes the
+        # same lock itself, and a plain Lock is not reentrant, so calling it
+        # from inside `with _lock:` below would deadlock this thread against
+        # itself on every fresh process's first call.
+        synth = make_synth()
         with _lock:
             if _sink is None:
                 kind = choose_sink()
-                synth = make_synth()
                 if kind == "local":
                     _sink = LocalSink(synth)
                 else:
@@ -72,18 +80,17 @@ def make_sink() -> LocalSink | TelegramSink:
     return _sink
 
 
-def _play(sink: LocalSink | TelegramSink, clips: list[Clip], voice: str | None,
-          note: str | None) -> SpeakResult:
-    # LocalSink.play() has no `note` param (local playback ignores it per spec);
-    # TelegramSink.play() does. Dispatch on the sink's own signature rather than
-    # isinstance so any Sink-shaped object (real or test fake) works uniformly.
+def _validate_voice(synth: KokoroSynth, voice: str) -> str | None:
+    """Eagerly validate an explicit voice override before dispatch. LocalSink's
+    worker fails an unknown voice silently in the background (regression: F3),
+    so the server must catch it itself before ever reaching either sink."""
     try:
-        accepts_note = "note" in inspect.signature(sink.play).parameters
-    except (TypeError, ValueError):
-        accepts_note = False
-    if accepts_note:
-        return sink.play(clips, voice, note=note)
-    return sink.play(clips, voice)
+        lang_for(voice)
+    except ConfigError as exc:
+        return str(exc)
+    if voice not in synth.voices():
+        return f"unknown voice: {voice!r}"
+    return None
 
 
 def _validate_clips(clips: list[Clip], note: str | None) -> str | None:
@@ -101,8 +108,18 @@ async def _dispatch(clips: list[Clip], note: str | None, voice: str | None) -> S
         sink = await asyncio.to_thread(make_sink)
     except ConfigError as exc:
         return SpeakResult(ok=False, sink="none", message=f"config: {exc}")
+
+    if voice is not None:
+        try:
+            synth = await asyncio.to_thread(make_synth)
+        except ConfigError as exc:
+            return SpeakResult(ok=False, sink="none", message=f"config: {exc}")
+        voice_err = _validate_voice(synth, voice)
+        if voice_err:
+            return SpeakResult(ok=False, sink="none", message=voice_err)
+
     try:
-        return await asyncio.to_thread(_play, sink, clips, voice, note)
+        return await asyncio.to_thread(sink.play, clips, voice, note=note)
     except ConfigError as exc:
         return SpeakResult(ok=False, sink="none", message=f"config: {exc}")
 
