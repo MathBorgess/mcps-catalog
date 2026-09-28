@@ -1,9 +1,11 @@
 import os
+import urllib.error
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from speak_mcp import synth
 from speak_mcp.errors import ConfigError
 from speak_mcp.synth import (
     MODEL,
@@ -11,6 +13,7 @@ from speak_mcp.synth import (
     VOICES_FILE,
     KokoroSynth,
     Settings,
+    _download,
     encode_ogg,
     encode_wav,
     ensure_models,
@@ -125,6 +128,77 @@ def test_encode_ogg_is_opus_in_ogg():
 def test_encode_wav_has_riff_header():
     data = encode_wav(_tone(), 24000)
     assert data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+
+
+# -- _download -----------------------------------------------------------
+
+
+class _FakeResponse:
+    """Minimal context-manager stand-in for urllib's HTTPResponse: one `read()` returns the
+    whole payload, the next returns b"" (EOF), matching how `_download`'s while-loop stops."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self, _n: int) -> bytes:
+        data, self._data = self._data, b""
+        return data
+
+
+def test_download_retries_transient_url_error_then_succeeds(tmp_path, monkeypatch):
+    monkeypatch.setattr(synth.time, "sleep", lambda seconds: None)  # keep the test instant
+    calls = {"n": 0}
+
+    def fake_urlopen(url, timeout=30):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("connection reset")
+        return _FakeResponse(b"payload")
+
+    monkeypatch.setattr(synth.urllib.request, "urlopen", fake_urlopen)
+
+    dest = tmp_path / "f.part"
+    _download("http://example/f", dest)
+
+    assert calls["n"] == 2  # failed once, succeeded on retry
+    assert dest.read_bytes() == b"payload"
+
+
+def test_download_retries_timeout_then_succeeds(tmp_path, monkeypatch):
+    monkeypatch.setattr(synth.time, "sleep", lambda seconds: None)
+    calls = {"n": 0}
+
+    def fake_urlopen(url, timeout=30):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("timed out")
+        return _FakeResponse(b"payload")
+
+    monkeypatch.setattr(synth.urllib.request, "urlopen", fake_urlopen)
+
+    _download("http://example/f", tmp_path / "f.part")
+    assert calls["n"] == 2
+
+
+def test_download_raises_last_error_after_exhausting_attempts(tmp_path, monkeypatch):
+    monkeypatch.setattr(synth.time, "sleep", lambda seconds: None)
+    calls = {"n": 0}
+
+    def fake_urlopen(url, timeout=30):
+        calls["n"] += 1
+        raise urllib.error.URLError(f"still down (attempt {calls['n']})")
+
+    monkeypatch.setattr(synth.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(urllib.error.URLError, match="attempt 3"):
+        _download("http://example/f", tmp_path / "f.part")
+    assert calls["n"] == 3  # default attempts=3, no more, no fewer
 
 
 # -- ensure_models -----------------------------------------------------------

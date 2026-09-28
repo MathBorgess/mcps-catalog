@@ -3,6 +3,8 @@
 import ctypes.util
 import io
 import os
+import time
+import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -103,10 +105,28 @@ def resolve_espeak(env: Mapping[str, str] = os.environ) -> tuple[str, str]:
     return lib, data
 
 
-def _download(url: str, dest_path: Path) -> None:
-    with urllib.request.urlopen(url, timeout=30) as resp, open(dest_path, "wb") as f:
-        while chunk := resp.read(1 << 20):
-            f.write(chunk)
+def _download(url: str, dest_path: Path, *, attempts: int = 3, backoff: float = 0.5) -> None:
+    """Fetch `url` into `dest_path`, retrying transient network errors.
+
+    Up to `attempts` tries with a short linear backoff between them; the destination is
+    reopened (truncated) on every attempt, so a partial write from a failed try never leaks
+    into the next one. ensure_models() still does the real correctness check (.part + exact
+    size before renaming into place) -- this only avoids treating one dropped connection as a
+    hard failure on a flaky cloud-VM network.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp, open(dest_path, "wb") as f:
+                while chunk := resp.read(1 << 20):
+                    f.write(chunk)
+            return
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_exc = exc
+            if attempt < attempts:
+                time.sleep(backoff * attempt)
+    assert last_exc is not None
+    raise last_exc
 
 
 def ensure_models(settings: Settings, fetch: Callable[[str, Path], None] = _download) -> None:

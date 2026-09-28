@@ -14,6 +14,11 @@
 # the script always exits 0.
 set -u
 
+# The setup script can run with a minimal PATH. `uv` lives at /root/.local/bin on the Claude
+# Code cloud VM and `claude` at /opt/node22/bin -- without this, `command -v uv` below can
+# silently miss an already-installed uv and take the slower python3-venv fallback instead.
+export PATH="/root/.local/bin:/opt/node22/bin:/usr/local/bin:$PATH"
+
 SPEAK_REF="${SPEAK_REF:-main}"
 HOME_DIR=/opt/speak
 VENV="$HOME_DIR/venv"
