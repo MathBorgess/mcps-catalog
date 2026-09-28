@@ -25,11 +25,11 @@ Or, from inside a session:
 
 This repo is not on Anthropic's official listing, so `claude plugin marketplace add` points straight at the GitHub repo. Update later with `claude plugin marketplace update mathborgess-mcps` and `claude plugin update <name>@mathborgess-mcps`.
 
-macOS prerequisite for `speak`: **`brew install espeak-ng`**. The pip-bundled `espeakng-loader` has a hard-coded data path and is not used; a system espeak-ng install is what `speak` actually links against. `ultrafast-browser` needs macOS on Apple Silicon, a local Chrome reachable over remote debugging, and its own upstream `.env` — see [`ultrafast-browser/README.md`](ultrafast-browser/README.md).
+Prerequisites: **`uv`** (`brew install uv`, or see [astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)) — every plugin here runs via `uvx`, so it must be on `PATH` for Claude Code to launch them. macOS prerequisite for `speak`: **`brew install espeak-ng`**. The pip-bundled `espeakng-loader` has a hard-coded data path and is not used; a system espeak-ng install is what `speak` actually links against. `ultrafast-browser` needs macOS on Apple Silicon, a local Chrome reachable over remote debugging, and its own upstream `.env` — see [`ultrafast-browser/README.md`](ultrafast-browser/README.md).
 
 ## speak
 
-Three tools: `speak(text, title?, voice?)` for one piece of text, `speak_clips(clips, note?, voice?)` for a sequence of independent clips, `speak_stop()` to stop local playback. The server's own MCP instructions tell the model to write spoken prose for the ear (no markdown, no URLs, numbers spelled out) and call `speak`/`speak_clips`, so day to day you just ask in plain language:
+See [`speak/README.md`](speak/README.md) for the full reference (tools, env vars, sinks, models, CLI, testing). Three tools: `speak(text, title?, voice?)` for one piece of text, `speak_clips(clips, note?, voice?)` for a sequence of independent clips, `speak_stop()` to stop local playback. The server's own MCP instructions tell the model to write spoken prose for the ear (no markdown, no URLs, numbers spelled out) and call `speak`/`speak_clips`, so day to day you just ask in plain language:
 
 > "me fala em áudio o resumo dessa PR"
 > "read this back to me"
@@ -58,14 +58,14 @@ Cloud sessions don't install plugins, so [`cloud/setup.sh`](cloud/setup.sh) prov
 - **`api.telegram.org`** in the allowed domains (Custom, on top of the defaults) — without it `speak` has no way to reach the Telegram API.
 - The **`TELEGRAM_BOT_TOKEN`** and **`TELEGRAM_CHAT_ID`** environment variables.
 
-The script installs `espeak-ng`, builds a venv at `/opt/speak/venv` with the `speak` package from this repo, downloads the models, and runs `claude mcp add --scope user speak ...`. If a session ever starts without that registration having survived, add a per-repo `.mcp.json` as a fallback:
+The script installs `espeak-ng`, builds a venv at `/opt/speak/venv` with the `speak` package from this repo, downloads the models, and runs `claude mcp add --scope user speak ...`. It installs from `git+https://github.com/MathBorgess/mcps-catalog@${SPEAK_REF}`, and `SPEAK_REF` defaults to `main` — so pasting the script as-is only works once the change is merged to `main`; while testing a branch or PR, set `SPEAK_REF` (in the environment, alongside the two `TELEGRAM_*` variables) to that branch or commit before running the setup script. If a session ever starts without that registration having survived, add a per-repo `.mcp.json` as a fallback:
 
 ```json
 {
   "mcpServers": {
     "speak": {
       "command": "/opt/speak/venv/bin/speak-mcp",
-      "env": { "SPEAK_HOME": "/opt/speak" }
+      "env": { "SPEAK_HOME": "/opt/speak", "SPEAK_SINK": "telegram" }
     }
   }
 }
@@ -75,7 +75,7 @@ The script installs `espeak-ng`, builds a venv at `/opt/speak/venv` with the `sp
 
 - The `speak` tools never accept a destination, chat id, URL, or file path — where a message goes is decided entirely by `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in the environment, never by the model or the caller.
 - The Telegram token never appears in any tool result or error, including chained exceptions — it is redacted everywhere it could otherwise leak.
-- `title`, `caption`, and `note` (visible Telegram text) reject `://`, `www.`, and control characters, so a tool call can't turn into a link or a terminal-escape payload in a chat message.
+- `title`, `caption`, and `note` (visible Telegram text) reject `://`, `www.`, and control characters, so a tool call can't smuggle a terminal-escape payload or an obvious `https://`/`www.`-style link into a chat message. This is not a full link blocker: Telegram auto-links bare domains (`evil.example`) and `@handles` on its own, and neither is caught by this check.
 - This is a **public repository**. It holds no secrets, no tokens, and no personal chat IDs — those live only in each user's own environment variables.
 
 ## Contributing

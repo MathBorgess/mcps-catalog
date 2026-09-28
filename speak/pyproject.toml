@@ -1,6 +1,6 @@
 [project]
 name = "speak-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Text-to-speech MCP server: Kokoro TTS locally, Telegram voice messages from cloud sessions."
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -22,3 +22,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["speak_mcp"]
+
+[tool.uv]
+# uv caches a local-directory build (`uvx --from ${CLAUDE_PLUGIN_ROOT} speak-mcp`, as used by
+# speak/.claude-plugin/plugin.json) keyed only by pyproject.toml by default, so editing
+# speak_mcp/*.py without touching this file left the plugin running stale code from a prior
+# build. Widen the cache key to the package sources too.
+cache-keys = [{ file = "pyproject.toml" }, { file = "speak_mcp/**/*.py" }]

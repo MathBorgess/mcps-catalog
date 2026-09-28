@@ -1,4 +1,5 @@
 import json
+import logging
 import traceback
 
 import httpx
@@ -127,3 +128,33 @@ def test_call_converts_unexpected_exception_to_redacted_send_error():
     assert "SECRET" not in str(exc.value)
     assert exc.value.__context__ is None
     assert exc.value.__cause__ is None
+
+
+# -- I1: httpx/httpcore must never log the token at INFO -----------------------
+
+
+def test_httpx_and_httpcore_loggers_are_silenced_on_import():
+    """speak_mcp.telegram must raise httpx's and httpcore's own loggers to
+    WARNING at import time -- httpx logs the full request URL (which embeds
+    the bot token, .../bot<TOKEN>/sendMessage) at INFO, and the MCP server
+    configures root/stderr logging at INFO (regression: I1)."""
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+def test_token_never_appears_in_any_log_record_during_a_real_send(caplog):
+    """Drives a real send through httpx's MockTransport (no network) with
+    root logging captured at DEBUG -- the level httpx/httpcore would log
+    the request line at if their own loggers were not silenced -- and
+    asserts the token is absent from every record, not just the raised
+    exception message."""
+    caplog.set_level(logging.DEBUG)
+
+    def handler(request):
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    Telegram(TOKEN, "42", client=client_with(handler)).send_message("olá")
+
+    for record in caplog.records:
+        assert TOKEN not in record.getMessage()
+        assert TOKEN not in caplog.text

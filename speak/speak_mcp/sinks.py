@@ -31,6 +31,7 @@ class Synth(Protocol):
 class Player(Protocol):
     def play_file(self, path: str) -> None: ...
     def stop(self) -> None: ...
+    def resolve(self) -> str: ...
 
 
 class Sender(Protocol):
@@ -88,6 +89,13 @@ class SubprocessPlayer:
                     "no audio player found (looked for afplay, paplay, aplay on PATH)")
         return self._binary
 
+    def resolve(self) -> str:
+        """Public wrapper around _resolve(): LocalSink.play() calls this
+        eagerly (before queueing anything) so a missing player binary
+        surfaces as a ConfigError -> ok:false tool result, instead of only
+        failing later inside the background worker (regression: I2b)."""
+        return self._resolve()
+
     def play_file(self, path: str) -> None:
         binary = self._resolve()
         # Popen() and registering self._proc happen under the same lock a
@@ -136,6 +144,13 @@ class LocalSink:
         # as a leading plain-text message) but local playback has nothing
         # analogous to send it as, so it is accepted and ignored here.
         del note
+        # Resolve (and cache) the player binary before queueing anything: the
+        # worker thread only discovers a missing player when it dequeues the
+        # job, by which point play() has already returned ok:true/queued to
+        # the caller -- a silent success that never actually plays anything.
+        # Failing fast here lets ConfigError propagate to the server's
+        # _dispatch(), which turns it into ok:false (regression: I2b).
+        self._player.resolve()
         results = []
         for i, clip in enumerate(clips):
             self._queue.put((clip, voice))
@@ -248,7 +263,17 @@ class TelegramSink:
             except Exception as exc:  # per-clip isolation
                 overall_ok = False
                 results.append(ClipResult(index=i, ok=False, error=str(exc)))
-        return SpeakResult(ok=overall_ok, sink="telegram", clips=results)
+        message = None
+        if not overall_ok:
+            # A per-clip failure (as opposed to the note failure above, which
+            # already carries its own message) must be visible at the
+            # top-level `message` too -- callers like the radar-audio skill
+            # summarize a run from `message`, and "ok: false" alone doesn't
+            # say how many of the clips actually went through
+            # (regression: M5).
+            failed = sum(1 for r in results if not r.ok)
+            message = f"{failed}/{len(results)} clips failed"
+        return SpeakResult(ok=overall_ok, sink="telegram", clips=results, message=message)
 
     def _play_one(self, index: int, clip: Clip, voice: str | None) -> ClipResult:
         # Kokoro has a phoneme limit per call: chunk, synthesize each piece, concatenate.

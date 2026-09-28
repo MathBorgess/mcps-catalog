@@ -10,6 +10,11 @@
 #   - the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables set.
 # Without those two, speak still installs and registers, but every call returns ok: false.
 #
+# Installs from git+https://github.com/MathBorgess/mcps-catalog@${SPEAK_REF:-main}: SPEAK_REF
+# defaults to `main`, so pasted as-is this only works once a change has actually been merged
+# there. To try an unmerged branch or PR, set the SPEAK_REF environment variable on that same
+# environment (alongside TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID) to that branch name or commit.
+#
 # Never fails the session: every step only logs to stderr with a "speak-setup:" prefix, and
 # the script always exits 0.
 set -u
@@ -66,7 +71,8 @@ if command -v claude >/dev/null; then
   # before re-adding, since whether a user-scope registration survives session start is
   # unverified -- this must be safe to run again every time the session boots.
   claude mcp remove --scope user speak >/dev/null 2>&1 || true
-  claude mcp add --scope user speak -e SPEAK_HOME="$HOME_DIR" -- "$VENV/bin/speak-mcp" \
+  claude mcp add --scope user speak -e SPEAK_HOME="$HOME_DIR" -e SPEAK_SINK=telegram \
+    -- "$VENV/bin/speak-mcp" \
     || echo "speak-setup: claude mcp add failed" >&2
 else
   echo "speak-setup: claude not on PATH, skipping MCP registration" >&2

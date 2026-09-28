@@ -72,5 +72,5 @@ jobs:
           sudo "$PY" -m pip install -q pytest 2>/dev/null \
             || sudo env PATH="/root/.local/bin:$PATH" bash -c "command -v uv >/dev/null && uv pip install -q --python $PY pytest" \
             || (sudo "$PY" -m ensurepip -q && sudo "$PY" -m pip install -q pytest)
-      - name: real-synthesis unit test (must run test_real_synthesis_pt_br unskipped)
-        run: cd speak && sudo /opt/speak/venv/bin/python -m pytest -q -rs tests/test_synth.py
+      - name: full speak test suite on the provisioned venv (must run test_real_synthesis_pt_br unskipped)
+        run: cd speak && sudo /opt/speak/venv/bin/python -m pytest -q -rs tests/

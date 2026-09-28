@@ -5,8 +5,10 @@ No args: run the stdio MCP server (never prints to stdout).
 """
 
 import argparse
+import signal
 import sys
 
+from speak_mcp import server
 from speak_mcp.clips import Clip
 from speak_mcp.errors import ConfigError
 from speak_mcp.server import make_synth, srv
@@ -49,6 +51,26 @@ def _cmd_setup() -> int:
     return 0
 
 
+def _stop_local_sink() -> None:
+    """Best-effort: stop the process-wide LocalSink's background player and
+    clear its queue, if the server ever built one (terminates the current
+    afplay/paplay/aplay child and drops pending jobs). Called after srv.run()
+    returns and from the SIGTERM handler below. Never touches stdout -- the
+    stdio MCP protocol channel -- so any failure here is swallowed silently
+    (regression: M1)."""
+    try:
+        sink = server._sink
+        if isinstance(sink, LocalSink):
+            sink.stop()
+    except Exception:
+        pass
+
+
+def _handle_sigterm(signum, frame) -> None:
+    _stop_local_sink()
+    raise SystemExit(0)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="speak-mcp")
     parser.add_argument("--say", metavar="TEXT",
@@ -75,7 +97,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return _cmd_sample(args.sample, args.out, args.voice)
 
-    srv.run()
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    try:
+        srv.run()
+    finally:
+        _stop_local_sink()
     return 0
 
 

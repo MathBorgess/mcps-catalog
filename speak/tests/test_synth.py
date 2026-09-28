@@ -378,6 +378,33 @@ def test_synthesize_defaults_voice_to_settings_voice(tmp_path, monkeypatch):
     assert sr == 24000 and isinstance(samples, np.ndarray)
 
 
+def test_default_voice_exposes_settings_voice(tmp_path, monkeypatch):
+    """Regression M3: default_voice must expose the resolved settings.voice
+    (SPEAK_VOICE or 'pf_dora') so the server can validate it against the
+    loaded voices file the same way an explicit override is validated."""
+    model_file = tmp_path / "models" / MODEL
+    voices_file = tmp_path / "models" / VOICES_FILE
+    model_file.parent.mkdir(parents=True)
+    model_file.write_bytes(b"dummy")
+    voices_file.write_bytes(b"dummy")
+
+    monkeypatch.setattr("speak_mcp.synth.resolve_espeak",
+                         lambda *a, **kw: (str(tmp_path / "libespeak-ng.so"), str(tmp_path)))
+
+    class FakeKokoro:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_voices(self):
+            return ["af_heart"]
+
+    monkeypatch.setattr("kokoro_onnx.Kokoro", FakeKokoro)
+
+    settings = Settings.from_env({"SPEAK_HOME": str(tmp_path), "SPEAK_VOICE": "af_heart"})
+    synth = KokoroSynth(settings)
+    assert synth.default_voice == "af_heart"
+
+
 def test_voices_delegates_to_kokoro(tmp_path, monkeypatch):
     model_file = tmp_path / "models" / MODEL
     voices_file = tmp_path / "models" / VOICES_FILE

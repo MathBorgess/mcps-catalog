@@ -36,7 +36,7 @@ text. Call `speak_clips` for several independent parts said in sequence. Call \
 cloud sessions it arrives as a voice message on the owner's Telegram instead.
 """
 
-srv = MCPServer("speak", instructions=INSTRUCTIONS)
+srv = MCPServer("speak", instructions=INSTRUCTIONS, log_level="WARNING")
 
 # Both make_synth() and make_sink() guard their own singleton with this same
 # lock. It is a plain (non-reentrant) Lock, so make_sink() must never call
@@ -112,14 +112,21 @@ async def _dispatch(clips: list[Clip], note: str | None, voice: str | None) -> S
     except ConfigError as exc:
         return SpeakResult(ok=False, sink="none", message=f"config: {exc}")
 
-    if voice is not None:
-        try:
-            synth = await asyncio.to_thread(make_synth)
-        except ConfigError as exc:
-            return SpeakResult(ok=False, sink="none", message=f"config: {exc}")
-        voice_err = _validate_voice(synth, voice)
-        if voice_err:
-            return SpeakResult(ok=False, sink="none", message=voice_err)
+    # Validate the voice that will actually be used -- an explicit override,
+    # or the default (SPEAK_VOICE) when the caller doesn't pass one. In the
+    # real server make_sink() above has already built the synth (both sink
+    # kinds need it), so this is just a cached lookup, not an extra build;
+    # skipping the default-voice check here would let a bad SPEAK_VOICE fail
+    # silently deep inside the sink's worker instead of a clean ok:false
+    # (regression: M3, the same class of bug F3 fixed for explicit voices).
+    try:
+        synth = await asyncio.to_thread(make_synth)
+    except ConfigError as exc:
+        return SpeakResult(ok=False, sink="none", message=f"config: {exc}")
+    effective_voice = voice if voice is not None else synth.default_voice
+    voice_err = _validate_voice(synth, effective_voice)
+    if voice_err:
+        return SpeakResult(ok=False, sink="none", message=voice_err)
 
     try:
         return await asyncio.to_thread(sink.play, clips, voice, note=note)

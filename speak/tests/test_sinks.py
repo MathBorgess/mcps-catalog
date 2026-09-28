@@ -48,11 +48,19 @@ class FakePlayer:
     """Records played paths (and whether the file existed at play time).
     Optionally blocks in play_file on an Event, to test stop()."""
 
-    def __init__(self, block_event: threading.Event | None = None):
+    def __init__(self, block_event: threading.Event | None = None, resolve_error: Exception | None = None):
         self.played: list[str] = []
         self.existed_when_played: list[bool] = []
         self.stopped = False
         self._block_event = block_event
+        self._resolve_error = resolve_error
+        self.resolve_calls = 0
+
+    def resolve(self) -> str:
+        self.resolve_calls += 1
+        if self._resolve_error is not None:
+            raise self._resolve_error
+        return "/fake/player"
 
     def play_file(self, path: str) -> None:
         self.existed_when_played.append(os.path.exists(path))
@@ -121,6 +129,64 @@ def test_play_returns_immediately_queued():
         {"index": 1, "ok": True, "seconds": 0.0, "error": None},
     ]
     assert sink.join(timeout=2.0)
+
+
+def test_play_resolves_player_before_queueing():
+    player = FakePlayer()
+    sink = LocalSink(FakeSynth(), player=player)
+    sink.play([Clip(text="oi")], voice=None)
+    assert player.resolve_calls == 1
+    assert sink.join(timeout=2.0)
+
+
+def test_play_resolves_once_per_call_not_once_per_clip():
+    player = FakePlayer()
+    sink = LocalSink(FakeSynth(), player=player)
+    sink.play([Clip(text="um"), Clip(text="dois"), Clip(text="tres")], voice=None)
+    assert player.resolve_calls == 1
+    assert sink.join(timeout=2.0)
+
+
+def test_play_raises_config_error_when_no_player_binary_and_never_queues():
+    """Regression I2b: a missing player binary must surface as a ConfigError
+    from play() itself (-> ok:false from the server), not a silent
+    ok:true/queued result that the background worker later fails on its own,
+    invisibly to the caller."""
+    player = FakePlayer(resolve_error=ConfigError("no audio player found"))
+    sink = LocalSink(FakeSynth(), player=player)
+    with pytest.raises(ConfigError, match="no audio player found"):
+        sink.play([Clip(text="oi")], voice=None)
+    assert sink._queue.qsize() == 0
+
+
+def test_play_resolve_uses_real_subprocess_player_with_no_binary_on_path(monkeypatch):
+    """End-to-end with the real SubprocessPlayer (not a fake): shutil.which
+    finds nothing, so resolve() -- called by LocalSink.play() -- raises
+    ConfigError before anything is enqueued."""
+    player = SubprocessPlayer(which=lambda name: None)
+    sink = LocalSink(FakeSynth(), player=player)
+    with pytest.raises(ConfigError):
+        sink.play([Clip(text="oi")], voice=None)
+    assert sink._queue.qsize() == 0
+
+
+def test_play_resolve_uses_real_subprocess_player_caches_binary(monkeypatch):
+    """resolve() caches the binary on the real SubprocessPlayer, so a second
+    play() call does not re-scan PATH."""
+    calls = []
+
+    def which(name):
+        calls.append(name)
+        return "/bin/afplay" if name == "afplay" else None
+
+    player = SubprocessPlayer(which=which)
+    sink = LocalSink(FakeSynth(), player=player)
+    sink.play([Clip(text="um")], voice=None)
+    assert sink.join(timeout=2.0)
+    first_call_count = len(calls)
+    sink.play([Clip(text="dois")], voice=None)
+    assert sink.join(timeout=2.0)
+    assert len(calls) == first_call_count  # no new shutil.which() calls: cached
 
 
 # -- LocalSink: FIFO order across calls ---------------------------------------
@@ -234,6 +300,9 @@ def test_pipelines_next_chunk_synthesis_during_playback():
     class BlockingFirstPlayer:
         def __init__(self):
             self.played: list[str] = []
+
+        def resolve(self) -> str:
+            return "/fake/player"
 
         def play_file(self, path):
             self.played.append(path)
@@ -398,6 +467,28 @@ def test_telegram_per_clip_isolation():
     assert result.clips[0].ok is False and result.clips[0].error is not None
     assert result.clips[1].ok is True
     assert len(sender.voices) == 1  # only the second clip's voice got through
+    assert result.message == "1/2 clips failed"
+
+
+def test_telegram_partial_failure_message_counts_correctly():
+    """Regression M5: the top-level `message` must summarize a partial
+    per-clip failure (e.g. "2/3 clips failed") so a caller like the
+    radar-audio skill can report how many clips actually went through,
+    not just that something failed."""
+    sender = FakeSender(fail_voice_on=frozenset({0, 2}))  # 1st and 3rd fail, 2nd succeeds
+    sink = TelegramSink(FakeSynth(), sender)
+    result = sink.play(
+        [Clip(text="um"), Clip(text="dois"), Clip(text="tres")], voice=None)
+    assert result.ok is False
+    assert result.message == "2/3 clips failed"
+
+
+def test_telegram_all_clips_succeed_message_is_none():
+    sender = FakeSender()
+    sink = TelegramSink(FakeSynth(), sender)
+    result = sink.play([Clip(text="um"), Clip(text="dois")], voice=None)
+    assert result.ok is True
+    assert result.message is None
 
 
 # -- TelegramSink: caption default and duration rounding -----------------------

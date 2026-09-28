@@ -183,6 +183,14 @@ class KokoroSynth:
         except Exception as exc:
             raise ConfigError(f"kokoro init failed: {exc}") from exc
 
+    @property
+    def default_voice(self) -> str:
+        """The voice a call falls back to when no explicit `voice` override
+        is given (SPEAK_VOICE, or 'pf_dora'). Exposed so callers can validate
+        it against the loaded voices file the same way an explicit override
+        is validated (regression: M3)."""
+        return self._settings.voice
+
     def voices(self) -> list[str]:
         return self._kokoro.get_voices()
 

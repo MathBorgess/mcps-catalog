@@ -47,8 +47,9 @@ class FakeSynth:
     """Exposes just enough of KokoroSynth's surface for voice validation
     (lang_for is a free function in synth.py, exercised directly)."""
 
-    def __init__(self, voices=("pf_dora", "af_heart", "bf_alice")):
+    def __init__(self, voices=("pf_dora", "af_heart", "bf_alice"), default_voice="pf_dora"):
         self._voices = list(voices)
+        self.default_voice = default_voice
 
     def voices(self):
         return self._voices
@@ -119,6 +120,7 @@ def test_speak_happy_path(monkeypatch):
 def test_speak_defaults_title_and_voice_to_none(monkeypatch):
     fake = FakeSink()
     monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
     _call("speak", {"text": "ola"})
     clips, voice, note = fake.play_calls[0]
     assert clips[0].caption is None
@@ -155,6 +157,22 @@ def test_speak_empty_text_is_validation_failure(monkeypatch):
     assert res.structured_content["ok"] is False
     assert "1-12000" in res.structured_content["message"]
     assert fake.play_calls == []  # never reached the sink
+
+
+def test_speak_whitespace_only_text_is_validation_failure(monkeypatch):
+    fake = FakeSink()
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    res = _call("speak", {"text": "   \n\t "})
+    assert res.structured_content["ok"] is False
+    assert fake.play_calls == []
+
+
+def test_speak_clips_whitespace_only_clip_text_is_validation_failure(monkeypatch):
+    fake = FakeSink()
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    res = _call("speak_clips", {"clips": [{"text": "   "}]})
+    assert res.structured_content["ok"] is False
+    assert fake.play_calls == []
 
 
 def test_speak_text_too_long_is_validation_failure(monkeypatch):
@@ -229,6 +247,7 @@ def test_speak_clips_note_too_long_is_validation_failure(monkeypatch):
 def test_speak_clips_note_allows_newlines(monkeypatch):
     fake = FakeSink()
     monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
     res = _call("speak_clips", {"clips": [{"text": "ola"}], "note": "linha um\nlinha dois"})
     assert res.structured_content["ok"] is True
 
@@ -435,19 +454,42 @@ def test_speak_known_voice_passes_validation(monkeypatch):
     assert len(fake.play_calls) == 1
 
 
-def test_speak_no_explicit_voice_skips_validation_entirely(monkeypatch):
-    """When the caller doesn't override the voice, the server must not force
-    a make_synth() build just to validate it (that would mean every call
-    pays for model loading, defeating the point of lazy construction)."""
+def test_speak_default_voice_is_validated_when_none_given(monkeypatch):
+    """Regression M3: the default voice (synth.default_voice, i.e. SPEAK_VOICE
+    or 'pf_dora') must be validated against the loaded voices the same way an
+    explicit override is -- otherwise a bad SPEAK_VOICE only fails silently
+    deep inside the sink's worker (the same class of bug F3 fixed for
+    explicit voices) instead of a clean ok:false from the server."""
     fake = FakeSink()
-
-    def _boom():
-        raise AssertionError("make_synth() must not be called when voice is None")
-
+    bad_default = FakeSynth(voices=("af_heart", "bf_alice"), default_voice="pz_unknown")
     monkeypatch.setattr(server, "make_sink", lambda: fake)
-    monkeypatch.setattr(server, "make_synth", _boom)
+    monkeypatch.setattr(server, "make_synth", lambda: bad_default)
+    res = _call("speak", {"text": "ola"})
+    assert res.structured_content["ok"] is False
+    assert "unknown voice" in res.structured_content["message"]
+    assert fake.play_calls == []
+
+
+def test_speak_clips_default_voice_is_validated_when_none_given(monkeypatch):
+    fake = FakeSink()
+    bad_default = FakeSynth(voices=("af_heart", "bf_alice"), default_voice="pz_unknown")
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: bad_default)
+    res = _call("speak_clips", {"clips": [{"text": "ola"}]})
+    assert res.structured_content["ok"] is False
+    assert fake.play_calls == []
+
+
+def test_speak_valid_default_voice_reaches_sink(monkeypatch):
+    """The default voice is validated (M3), but a good one still dispatches
+    normally -- this is not a new build-avoidance guarantee, just a
+    validation-correctness one."""
+    fake = FakeSink()
+    monkeypatch.setattr(server, "make_sink", lambda: fake)
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)  # default_voice="pf_dora" is loaded
     res = _call("speak", {"text": "ola"})
     assert res.structured_content["ok"] is True
+    assert len(fake.play_calls) == 1
 
 
 # -- stdio initialize handshake (real subprocess, real protocol) --------------

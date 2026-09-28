@@ -48,6 +48,18 @@ def test_text_error_accepts_max_len_exactly():
     assert text_error("x" * 3000, 3000) is None
 
 
+def test_text_error_rejects_whitespace_only():
+    """Regression M4: text that is nothing but whitespace (spaces, tabs,
+    newlines) passes the length check but has nothing for Kokoro to speak,
+    so it must be its own validation failure, not a silent no-op clip."""
+    assert text_error("   ", 12000) is not None
+    assert text_error("\n\n\t", 12000) is not None
+
+
+def test_text_error_accepts_text_with_surrounding_whitespace():
+    assert text_error("  olá mundo  ", 12000) is None
+
+
 # -- label_error ---------------------------------------------------------
 
 

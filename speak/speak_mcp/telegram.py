@@ -1,5 +1,6 @@
 """Minimal Telegram Bot API client: plain-text message and OGG voice, to one fixed chat."""
 
+import logging
 import os
 from collections.abc import Mapping
 
@@ -8,6 +9,13 @@ import httpx
 from speak_mcp.errors import ConfigError, SendError
 
 TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+
+# httpx logs the full request URL -- including .../bot<TOKEN>/sendMessage -- at INFO, and the
+# MCP server configures root/stderr logging at INFO (see MCPServer(log_level=...) in server.py).
+# Silence both httpx's and its transport library httpcore's loggers at import time so the bot
+# token can never reach stderr through a log line (regression: I1).
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 class Telegram:

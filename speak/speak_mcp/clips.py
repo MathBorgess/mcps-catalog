@@ -25,6 +25,8 @@ class Clip(BaseModel):
 def text_error(text: str, max_len: int) -> str | None:
     if not 1 <= len(text) <= max_len:
         return f"text must be 1-{max_len} chars"
+    if not text.strip():
+        return "text must not be blank"
     return None
 
 
