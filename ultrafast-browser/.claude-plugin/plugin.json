@@ -1,0 +1,18 @@
+{
+  "name": "ultrafast-browser",
+  "version": "0.1.0",
+  "description": "Laya-powered fast browser use (macOS, Apple Silicon)",
+  "author": {
+    "name": "Matheus Borges",
+    "url": "https://github.com/MathBorgess"
+  },
+  "homepage": "https://github.com/MathBorgess/mcps-catalog",
+  "repository": "https://github.com/MathBorgess/mcps-catalog",
+  "license": "MIT",
+  "mcpServers": {
+    "ultrafast-browser": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/MathBorgess/ultrafast-browser-mcp@094f9aa1a6ae2409ba9345b9afffaf80707250ef", "laya-mcp"]
+    }
+  }
+}
