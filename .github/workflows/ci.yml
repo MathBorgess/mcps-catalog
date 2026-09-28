@@ -1,0 +1,72 @@
+name: ci
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.11"
+          - os: ubuntu-24.04
+            python-version: "3.12"
+          - os: macos-14
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: install and test the speak package
+        run: cd speak && pip install -e . pytest && pytest -q -rs
+
+  pins:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ultrafast-browser pinned sha matches the submodule commit
+        run: python3 scripts/check_pins.py
+      - name: root test suite (exercises check_pins.py itself)
+        run: pip install -q pytest && python3 -m pytest -q -rs
+
+  cloud-smoke:   # same OS/arch as the Claude Code cloud VM; runs the real cloud/setup.sh
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install uv for root (mirrors the cloud VM, which has uv preinstalled)
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh \
+            || echo "uv install failed; cloud/setup.sh's python3-venv fallback will run instead"
+          sudo command -v uv || echo "uv not on root's PATH; cloud/setup.sh will fall back to python3 -m venv"
+      - name: run the real speak cloud setup script, pinned to this PR's head commit
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          time sudo SPEAK_REF="$HEAD_SHA" bash cloud/setup.sh
+      - name: sample synthesis with the provisioned venv
+        run: |
+          sudo SPEAK_HOME=/opt/speak /opt/speak/venv/bin/speak-mcp \
+            --sample "Teste do speak no runner." --out /tmp/s.ogg
+          head -c 4 /tmp/s.ogg | grep -q OggS
+      - name: install pytest into the provisioned venv
+        run: |
+          PY=/opt/speak/venv/bin/python
+          sudo "$PY" -m pip install -q pytest 2>/dev/null \
+            || sudo env PATH="$PATH" bash -c "command -v uv >/dev/null && uv pip install -q --python $PY pytest" \
+            || (sudo "$PY" -m ensurepip -q && sudo "$PY" -m pip install -q pytest)
+      - name: real-synthesis unit test (must run test_real_synthesis_pt_br unskipped)
+        run: cd speak && sudo /opt/speak/venv/bin/python -m pytest -q -rs tests/test_synth.py
