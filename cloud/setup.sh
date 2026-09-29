@@ -8,6 +8,9 @@
 #   - api.telegram.org added to the allowed domains (Custom, on top of the defaults) -- without
 #     it the speak MCP has no way to reach the Telegram API for voice messages.
 #   - the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables set.
+#     TELEGRAM_CHAT_ID is the numeric id of YOUR private chat with the bot (the same number as
+#     your Telegram user id, e.g. 123456789). It is NOT the number before the ":" in the bot
+#     token (that is the bot's own id: Telegram answers "the bot can't send messages to the bot").
 # Without those two, speak still installs and registers, but every call returns ok: false.
 #
 # Installs from git+https://github.com/MathBorgess/mcps-catalog@${SPEAK_REF:-main}: SPEAK_REF
@@ -23,6 +26,7 @@ set -u
 # Code cloud VM and `claude` at /opt/node22/bin -- without this, `command -v uv` below can
 # silently miss an already-installed uv and take the slower python3-venv fallback instead.
 export PATH="/root/.local/bin:/opt/node22/bin:/usr/local/bin:$PATH"
+export DEBIAN_FRONTEND=noninteractive
 
 SPEAK_REF="${SPEAK_REF:-main}"
 HOME_DIR=/opt/speak
@@ -32,11 +36,29 @@ export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-60}"
 
 mkdir -p "$HOME_DIR/models"
 
-# apt (espeak-ng for synthesis, python3-venv for the no-uv fallback below) runs in the
-# background: it is independent of the venv/package install job, so the two can race.
-( apt-get -o Acquire::http::Timeout=30 update -qq \
-  && apt-get -o Acquire::http::Timeout=30 install -y -qq espeak-ng python3-venv >/dev/null ) \
-  || echo "speak-setup: espeak-ng install failed" >&2 &
+# espeak-ng is the system phonemizer Kokoro needs: without it every speak call fails with
+# "config: system espeak-ng not found" before a single clip is synthesized. python3-venv is
+# only needed by the no-uv fallback below.
+APT_PKGS="espeak-ng"
+command -v uv >/dev/null || APT_PKGS="$APT_PKGS python3-venv"
+
+# One attempt: `update` is best-effort on purpose. The cloud proxy answers 403 for some
+# third-party PPAs already configured on the image (deadsnakes, ondrej); that must not skip
+# the install, so it is never chained to it with &&. The lock timeout covers another apt/dpkg
+# process still running while the VM boots.
+apt_install_once() {
+  apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 \
+    update -qq >/dev/null 2>&1 \
+    || echo "speak-setup: apt-get update reported errors, installing anyway" >&2
+  # shellcheck disable=SC2086  # APT_PKGS is a space-separated list on purpose
+  apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 \
+    install -y -qq $APT_PKGS >/dev/null
+}
+
+# Independent of the venv/package install job, so it runs in the background and the two race.
+# Retried once: a transient failure here is what leaves the VM without espeak-ng.
+( apt_install_once || { sleep 5; apt_install_once; } ) \
+  || echo "speak-setup: apt install of $APT_PKGS failed twice" >&2 &
 APT_PID=$!
 
 if command -v uv >/dev/null; then
@@ -55,6 +77,15 @@ else
 fi
 
 wait
+
+# Fail loud, in the setup log, when the phonemizer is still missing: this is the line to look
+# for when a session's speak call returns "system espeak-ng not found". It checks the shared
+# library, which is what speak_mcp.synth.resolve_espeak looks up, not the espeak-ng binary.
+if ldconfig -p 2>/dev/null | grep -q 'libespeak-ng'; then
+  echo "speak-setup: libespeak-ng ok" >&2
+else
+  echo "speak-setup: ERROR libespeak-ng still missing after install; speak will fail" >&2
+fi
 
 if [ -x "$VENV/bin/speak-mcp" ]; then
   # Downloads the Kokoro model + voices (to .part, size-checked, then renamed -- see
