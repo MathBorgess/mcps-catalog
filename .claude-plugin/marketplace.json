@@ -1,0 +1,37 @@
+{
+  "name": "mathborgess-mcps",
+  "owner": {
+    "name": "Matheus Borges",
+    "url": "https://github.com/MathBorgess"
+  },
+  "description": "Matheus Borges's MCP servers as installable Claude Code plugins.",
+  "plugins": [
+    {
+      "name": "speak",
+      "source": "./speak",
+      "description": "Text-to-speech: Kokoro TTS plays locally on the Mac, Telegram voice messages from cloud sessions.",
+      "category": "productivity",
+      "keywords": [
+        "tts",
+        "text-to-speech",
+        "audio",
+        "kokoro",
+        "telegram",
+        "voice"
+      ]
+    },
+    {
+      "name": "ultrafast-browser",
+      "source": "./ultrafast-browser",
+      "description": "Laya browser-use MCP: fast local browser automation on macOS via Apple MLX.",
+      "category": "productivity",
+      "keywords": [
+        "browser",
+        "browser-use",
+        "automation",
+        "mlx",
+        "laya"
+      ]
+    }
+  ]
+}

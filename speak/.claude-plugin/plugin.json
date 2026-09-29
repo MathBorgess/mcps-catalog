@@ -1,0 +1,18 @@
+{
+  "name": "speak",
+  "version": "0.1.1",
+  "description": "Text-to-speech MCP server: Kokoro TTS plays locally on the Mac, and sends Telegram voice messages from cloud sessions.",
+  "author": {
+    "name": "Matheus Borges",
+    "url": "https://github.com/MathBorgess"
+  },
+  "homepage": "https://github.com/MathBorgess/mcps-catalog",
+  "repository": "https://github.com/MathBorgess/mcps-catalog",
+  "license": "MIT",
+  "mcpServers": {
+    "speak": {
+      "command": "uvx",
+      "args": ["--from", "${CLAUDE_PLUGIN_ROOT}", "speak-mcp"]
+    }
+  }
+}
