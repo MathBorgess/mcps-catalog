@@ -1,6 +1,6 @@
-"""Sinks: async local audio playback (afplay/paplay/aplay) and a synchronous
-Telegram voice-message sink. Runs inside a stdio MCP server: never write to
-stdout; worker errors are logged to stderr only.
+"""Sinks: async local audio playback (afplay/paplay/aplay) and a Telegram
+voice-message sink that answers within a soft deadline. Runs inside a stdio MCP
+server: never write to stdout; worker errors are logged to stderr only.
 """
 
 import os
@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -22,6 +23,13 @@ from speak_mcp.errors import ConfigError
 from speak_mcp.synth import encode_ogg, encode_wav
 
 PLAYER_BINARIES = ("afplay", "paplay", "aplay")
+
+# Claude Code gives an MCP tool call 60s before it gives up on the reply, and a
+# radar-sized batch of clips takes minutes to synthesize on the cloud VM. The
+# Telegram sink therefore answers after this long even if delivery is still
+# running (see TelegramSink); 45s leaves headroom under that 60s limit.
+DEFAULT_WAIT_SECONDS = 45.0
+MAX_WAIT_SECONDS = 3600.0
 
 
 class Synth(Protocol):
@@ -44,6 +52,9 @@ class ClipResult(BaseModel):
     ok: bool
     seconds: float = 0.0
     error: str | None = None
+    # True when the clip was accepted but not yet delivered at the time the
+    # tool answered (Telegram soft deadline); `ok` is then not a delivery receipt.
+    pending: bool = False
 
 
 class SpeakResult(BaseModel):
@@ -65,6 +76,21 @@ def choose_sink(env: Mapping[str, str] = os.environ) -> str:
     if env.get("CLAUDE_CODE_REMOTE_SESSION_ID") or env.get("CLAUDE_CODE_REMOTE"):
         return "telegram"
     return "local"
+
+
+def wait_seconds_from_env(env: Mapping[str, str] = os.environ) -> float:
+    """SPEAK_WAIT_SECONDS: how long a Telegram call waits for delivery before
+    answering `queued`. 0 means answer immediately."""
+    raw = env.get("SPEAK_WAIT_SECONDS")
+    if not raw or not raw.strip():
+        return DEFAULT_WAIT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError("SPEAK_WAIT_SECONDS must be a number") from None
+    if not 0 <= value <= MAX_WAIT_SECONDS:
+        raise ConfigError(f"SPEAK_WAIT_SECONDS must be 0-{MAX_WAIT_SECONDS:g}")
+    return value
 
 
 class SubprocessPlayer:
@@ -239,30 +265,105 @@ class LocalSink:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TelegramSink:
-    """Synchronous Telegram delivery: one OGG/Opus voice message per clip."""
+@dataclass
+class _Job:
+    clips: list[Clip]
+    voice: str | None
+    note: str | None
+    progress: list[ClipResult] = field(default_factory=list)
+    done: threading.Event = field(default_factory=threading.Event)
+    result: SpeakResult | None = None
+    detached: bool = False  # play() already answered `queued`; nobody reads `result`
 
-    def __init__(self, synth: Synth, sender: Sender):
+
+class TelegramSink:
+    """Telegram delivery: one OGG/Opus voice message per clip.
+
+    A single daemon worker delivers jobs FIFO (across calls, so messages keep
+    their order and synthesis never runs twice at once). play() waits for its
+    job for up to `wait_seconds`: if it finishes in time the result is the full
+    per-clip report; otherwise play() answers `queued=True` with what has been
+    delivered so far and the rest keeps going in the background (failures then
+    only reach stderr, like LocalSink's worker)."""
+
+    def __init__(self, synth: Synth, sender: Sender, wait_seconds: float = DEFAULT_WAIT_SECONDS):
         self._synth = synth
         self._sender = sender
+        self._wait = wait_seconds
+        self._jobs: "queue.Queue[_Job]" = queue.Queue()
+        self._worker = threading.Thread(target=self._run, name="speak-mcp-telegram-sink", daemon=True)
+        self._worker.start()
 
     def play(self, clips: list[Clip], voice: str | None, note: str | None = None) -> SpeakResult:
-        if note:
+        job = _Job(clips=clips, voice=voice, note=note)
+        self._jobs.put(job)
+        if job.done.wait(self._wait):
+            return job.result
+        job.detached = True
+        if job.done.is_set():  # finished between the timeout and the flag: report it in full
+            return job.result
+        return self._pending_result(job)
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Block until every enqueued job is delivered (or `timeout` elapses).
+        Returns False on timeout. Used at shutdown so a normal exit does not
+        cut off clips still being sent, and as a test hook."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self._jobs.unfinished_tasks > 0:
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
             try:
-                self._sender.send_message(note)
+                job.result = self._deliver(job)
+            except Exception as exc:  # worker must survive; stdio protocol -> stderr only
+                print(f"[speak-mcp] telegram sink worker error: {exc}", file=sys.stderr)
+                job.result = SpeakResult(ok=False, sink="telegram", message=f"worker: {exc}")
+            if job.detached and not job.result.ok:
+                print(f"[speak-mcp] telegram delivery failed after the tool answered: "
+                      f"{job.result.message}", file=sys.stderr)
+            job.done.set()
+            self._jobs.task_done()
+
+    def _pending_result(self, job: _Job) -> SpeakResult:
+        total = len(job.clips)
+        finished = list(job.progress)
+        sent = sum(1 for r in finished if r.ok)
+        failed = len(finished) - sent
+        remaining = total - len(finished)
+        results = finished + [ClipResult(index=i, ok=True, pending=True)
+                              for i in range(len(finished), total)]
+        parts = []
+        if failed:
+            parts.append(f"{failed}/{total} clips failed")
+        if remaining:
+            parts.append(f"{sent}/{total} clips sent, {remaining} still sending in the "
+                         "background (their results are not reported)")
+        return SpeakResult(ok=failed == 0, sink="telegram", queued=remaining > 0,
+                           clips=results, message="; ".join(parts) or None)
+
+    def _deliver(self, job: _Job) -> SpeakResult:
+        if job.note:
+            try:
+                self._sender.send_message(job.note)
             except Exception as exc:
                 err = f"note: {exc}"
-                results = [ClipResult(index=i, ok=False, error=err) for i in range(len(clips))]
+                results = [ClipResult(index=i, ok=False, error=err) for i in range(len(job.clips))]
+                job.progress.extend(results)
                 return SpeakResult(ok=False, sink="telegram", clips=results, message=err)
 
-        results = []
         overall_ok = True
-        for i, clip in enumerate(clips):
+        for i, clip in enumerate(job.clips):
             try:
-                results.append(self._play_one(i, clip, voice))
+                job.progress.append(self._play_one(i, clip, job.voice))
             except Exception as exc:  # per-clip isolation
                 overall_ok = False
-                results.append(ClipResult(index=i, ok=False, error=str(exc)))
+                job.progress.append(ClipResult(index=i, ok=False, error=str(exc)))
+        results = list(job.progress)
         message = None
         if not overall_ok:
             # A per-clip failure (as opposed to the note failure above, which

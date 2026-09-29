@@ -12,7 +12,7 @@ from speak_mcp import server
 from speak_mcp.clips import Clip
 from speak_mcp.errors import ConfigError
 from speak_mcp.server import make_synth, srv
-from speak_mcp.sinks import LocalSink
+from speak_mcp.sinks import LocalSink, TelegramSink
 from speak_mcp.synth import KokoroSynth, Settings, encode_ogg, ensure_models
 
 
@@ -66,6 +66,23 @@ def _stop_local_sink() -> None:
         pass
 
 
+# How long a normal shutdown waits for Telegram clips still being sent after a
+# `queued` answer (see TelegramSink). SIGTERM does not wait: it must exit promptly.
+FLUSH_SECONDS = 300.0
+
+
+def _flush_telegram_sink() -> None:
+    """Best-effort: on a normal exit (stdin closed) let the process-wide
+    TelegramSink finish clips it already accepted, so a `queued` answer is not
+    a promise the server drops at shutdown. Never touches stdout."""
+    try:
+        sink = server._sink
+        if isinstance(sink, TelegramSink):
+            sink.join(timeout=FLUSH_SECONDS)
+    except Exception:
+        pass
+
+
 def _handle_sigterm(signum, frame) -> None:
     _stop_local_sink()
     raise SystemExit(0)
@@ -100,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     try:
         srv.run()
+        _flush_telegram_sink()
     finally:
         _stop_local_sink()
     return 0

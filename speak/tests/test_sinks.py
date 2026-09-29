@@ -23,6 +23,7 @@ from speak_mcp.sinks import (
     SubprocessPlayer,
     TelegramSink,
     choose_sink,
+    wait_seconds_from_env,
 )
 
 SR = 24000
@@ -125,8 +126,8 @@ def test_play_returns_immediately_queued():
     assert result.sink == "local"
     assert result.queued is True
     assert [c.model_dump() for c in result.clips] == [
-        {"index": 0, "ok": True, "seconds": 0.0, "error": None},
-        {"index": 1, "ok": True, "seconds": 0.0, "error": None},
+        {"index": 0, "ok": True, "seconds": 0.0, "error": None, "pending": False},
+        {"index": 1, "ok": True, "seconds": 0.0, "error": None, "pending": False},
     ]
     assert sink.join(timeout=2.0)
 
@@ -564,6 +565,151 @@ def test_telegram_concatenates_multiple_chunks():
     assert expected_seconds != last_chunk_only_seconds
 
 
+# -- TelegramSink: soft deadline (the client's 60s tool timeout) ----------------
+
+
+class GatedSynth(FakeSynth):
+    """Blocks synthesis of the chunk "lento" until `release` is set."""
+
+    def __init__(self):
+        super().__init__()
+        self.release = threading.Event()
+
+    def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
+        if text == "lento":
+            assert self.release.wait(5.0), "test never released the slow clip"
+        return super().synthesize(text, voice)
+
+
+def test_telegram_slow_delivery_answers_queued_and_keeps_sending():
+    synth, sender = GatedSynth(), FakeSender()
+    sink = TelegramSink(synth, sender, wait_seconds=0.05)
+    t0 = time.monotonic()
+    result = sink.play([Clip(text="rapido"), Clip(text="lento"), Clip(text="depois")],
+                       voice=None, note="edição")
+    assert time.monotonic() - t0 < 2.0  # answered at the deadline, not at the end
+    assert result.ok is True and result.queued is True and result.sink == "telegram"
+    assert [(r.index, r.pending) for r in result.clips] == [(0, False), (1, True), (2, True)]
+    assert result.clips[0].seconds > 0
+    assert result.message == ("1/3 clips sent, 2 still sending in the background "
+                              "(their results are not reported)")
+
+    synth.release.set()
+    assert sink.join(timeout=5.0) is True
+    assert sender.messages == ["edição"]
+    assert len(sender.voices) == 3  # nothing was dropped after answering
+
+
+def test_telegram_deadline_zero_answers_immediately_with_everything_pending():
+    synth, sender = GatedSynth(), FakeSender()
+    sink = TelegramSink(synth, sender, wait_seconds=0)
+    result = sink.play([Clip(text="lento")], voice=None)
+    assert result.queued is True and result.ok is True
+    assert [r.pending for r in result.clips] == [True]
+    synth.release.set()
+    assert sink.join(timeout=5.0) is True
+    assert len(sender.voices) == 1
+
+
+def test_telegram_within_deadline_still_returns_the_full_report():
+    sender = FakeSender(fail_voice_on=frozenset({1}))
+    sink = TelegramSink(FakeSynth(), sender, wait_seconds=30.0)
+    result = sink.play([Clip(text="a"), Clip(text="b")], voice=None)
+    assert result.queued is False
+    assert [r.pending for r in result.clips] == [False, False]
+    assert result.ok is False and result.message == "1/2 clips failed"
+
+
+def test_telegram_failure_before_the_deadline_is_reported_with_pending_rest():
+    synth, sender = GatedSynth(), FakeSender(fail_voice_on=frozenset({0}))
+    sink = TelegramSink(synth, sender, wait_seconds=0.2)
+    result = sink.play([Clip(text="falha"), Clip(text="lento")], voice=None)
+    assert result.queued is True and result.ok is False
+    assert result.clips[0].ok is False and result.clips[0].error is not None
+    assert result.clips[1].pending is True
+    assert result.message == ("1/2 clips failed; 0/2 clips sent, 1 still sending in the "
+                              "background (their results are not reported)")
+    synth.release.set()
+    assert sink.join(timeout=5.0) is True
+
+
+def test_telegram_jobs_are_delivered_in_call_order():
+    synth, sender = GatedSynth(), FakeSender()
+    sink = TelegramSink(synth, sender, wait_seconds=0.05)
+    first = sink.play([Clip(text="lento", caption="um")], voice=None)
+    second = sink.play([Clip(text="rapido", caption="dois")], voice=None)
+    assert first.queued is True and second.queued is True
+    synth.release.set()
+    assert sink.join(timeout=5.0) is True
+    assert [caption for _ogg, caption, _dur in sender.voices] == ["um", "dois"]
+
+
+def test_telegram_failure_after_the_answer_goes_to_stderr_never_stdout(capsys):
+    synth, sender = GatedSynth(), FakeSender(fail_voice_on=frozenset({0}))
+    sink = TelegramSink(synth, sender, wait_seconds=0.05)
+    result = sink.play([Clip(text="lento")], voice=None)
+    assert result.queued is True
+    synth.release.set()
+    assert sink.join(timeout=5.0) is True
+    deadline = time.monotonic() + 2.0
+    err = ""
+    while "failed after the tool answered" not in err and time.monotonic() < deadline:
+        err += capsys.readouterr().err
+        time.sleep(0.01)
+    assert "1/1 clips failed" in err
+    assert capsys.readouterr().out == ""
+
+
+def test_telegram_join_times_out_while_a_job_is_still_running():
+    synth = GatedSynth()
+    sink = TelegramSink(synth, FakeSender(), wait_seconds=0)
+    sink.play([Clip(text="lento")], voice=None)
+    assert sink.join(timeout=0.05) is False
+    synth.release.set()
+    assert sink.join(timeout=5.0) is True
+
+
+def test_telegram_join_returns_immediately_when_idle():
+    assert TelegramSink(FakeSynth(), FakeSender()).join(timeout=0.05) is True
+
+
+def test_telegram_worker_survives_an_unexpected_delivery_error(monkeypatch, capsys):
+    sink = TelegramSink(FakeSynth(), FakeSender())
+    real = sink._deliver
+    calls = []
+
+    def flaky(job):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real(job)
+
+    monkeypatch.setattr(sink, "_deliver", flaky)
+    first = sink.play([Clip(text="a")], voice=None)
+    assert first.ok is False and first.message == "worker: boom"
+    assert "telegram sink worker error: boom" in capsys.readouterr().err
+    assert sink.play([Clip(text="b")], voice=None).ok is True
+
+
+# -- wait_seconds_from_env --------------------------------------------------------
+
+
+def test_wait_seconds_defaults_to_45():
+    assert wait_seconds_from_env({}) == 45.0
+    assert wait_seconds_from_env({"SPEAK_WAIT_SECONDS": "  "}) == 45.0
+
+
+@pytest.mark.parametrize("raw,expected", [("0", 0.0), ("30", 30.0), ("12.5", 12.5), ("3600", 3600.0)])
+def test_wait_seconds_accepts_a_number_in_range(raw, expected):
+    assert wait_seconds_from_env({"SPEAK_WAIT_SECONDS": raw}) == expected
+
+
+@pytest.mark.parametrize("raw", ["abc", "-1", "3601", "nan", "inf"])
+def test_wait_seconds_rejects_bad_values_as_config_error(raw):
+    with pytest.raises(ConfigError, match="SPEAK_WAIT_SECONDS"):
+        wait_seconds_from_env({"SPEAK_WAIT_SECONDS": raw})
+
+
 # -- TelegramSink: stop() -------------------------------------------------------
 
 
@@ -578,7 +724,7 @@ def test_telegram_stop_is_a_noop_result():
 
 def test_clip_result_defaults():
     r = ClipResult(index=0, ok=True)
-    assert r.seconds == 0.0 and r.error is None
+    assert r.seconds == 0.0 and r.error is None and r.pending is False
 
 
 def test_speak_result_defaults():

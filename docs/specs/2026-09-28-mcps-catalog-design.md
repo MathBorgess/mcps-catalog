@@ -62,6 +62,7 @@ The tools never accept a destination, chat id, URL or file path.
 
 - **local**: text is split into sentence chunks (≤ ~400 chars, never mid-word); a single background worker synthesizes chunk by chunk and plays each with `afplay` (macOS; `paplay`/`aplay` fallback on Linux) as soon as it is ready, so long text starts within seconds. `speak_stop` kills the current player and drains the queue. Temporary files go to a private temp dir and are deleted after playing.
 - **telegram**: synchronous; whole text → one OGG/Opus voice message (`sendVoice`, 24 kHz), caption plain text, no `parse_mode`, link previews disabled on `sendMessage`. Destination only from `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (stripped). The token never appears in any error, including chained exceptions.
+  > Amended 2026-09-29: delivery is no longer strictly synchronous. A call waits `SPEAK_WAIT_SECONDS` (default 45) for its clips and then answers `queued: true` while delivery continues in the background, because a batch takes minutes and Claude Code drops an MCP reply after 60 s. See `speak/README.md`, section Sinks.
 
 Config errors (missing env, model, espeak-ng) come back as a tool result with `ok: false`, never an unhandled exception. The server starts without models or env (lazy load on first call).
 

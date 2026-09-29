@@ -44,6 +44,7 @@ Locally on the Mac it plays right away through `afplay` (or `paplay`/`aplay` on 
 | `SPEAK_VOICE` | `pf_dora` | Kokoro voice id; its first letter picks the language (`p`→pt-br, `a`→en-us, `b`→en-gb, `e`→es, `f`→fr-fr, `i`→it, `j`→ja, `z`→cmn, `h`→hi) |
 | `SPEAK_SPEED` | `1.0` | `0.7`–`1.5` |
 | `SPEAK_HOME` | `/opt/speak` if that directory exists, else `~/.cache/speak-mcp` | models live in `<home>/models/` |
+| `SPEAK_WAIT_SECONDS` | `45` | `telegram` sink only: how long a call waits for delivery before answering `queued: true` (`0`–`3600`; keep it under the client's 60s tool timeout) |
 | `TELEGRAM_BOT_TOKEN` | — | required for the `telegram` sink |
 | `TELEGRAM_CHAT_ID` | — | required for the `telegram` sink |
 | `SPEAK_ESPEAK_LIB` | auto-detected | override the espeak-ng shared library path |
