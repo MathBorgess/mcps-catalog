@@ -12,7 +12,7 @@ import sys
 
 from speak_mcp import __main__ as main_module
 from speak_mcp import server
-from speak_mcp.sinks import LocalSink
+from speak_mcp.sinks import LocalSink, TelegramSink
 
 
 # -- _stop_local_sink: best-effort shutdown cleanup ----------------------------
@@ -165,3 +165,48 @@ def test_sigterm_before_any_call_exits_promptly_and_stdout_stays_clean():
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+
+
+# -- _flush_telegram_sink: let accepted clips finish on a normal exit ------------
+
+
+def test_flush_telegram_sink_joins_a_built_telegram_sink(monkeypatch):
+    class FakeSynth:
+        pass
+
+    class FakeSender:
+        pass
+
+    sink = TelegramSink(FakeSynth(), FakeSender())
+    joined = []
+    monkeypatch.setattr(sink, "join", lambda timeout=None: joined.append(timeout) or True)
+    monkeypatch.setattr(server, "_sink", sink)
+    main_module._flush_telegram_sink()
+    assert joined == [main_module.FLUSH_SECONDS]
+
+
+def test_flush_telegram_sink_is_a_noop_without_a_telegram_sink(monkeypatch):
+    monkeypatch.setattr(server, "_sink", None)
+    main_module._flush_telegram_sink()  # must not raise
+
+
+def test_flush_telegram_sink_swallows_exceptions(monkeypatch):
+    class Exploding(TelegramSink):
+        def __init__(self):
+            pass
+
+        def join(self, timeout=None):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(server, "_sink", Exploding())
+    main_module._flush_telegram_sink()  # must not raise
+
+
+def test_main_flushes_telegram_sink_after_srv_run_returns(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main_module, "_flush_telegram_sink", lambda: calls.append("flush"))
+    monkeypatch.setattr(main_module, "_stop_local_sink", lambda: calls.append("stop"))
+    monkeypatch.setattr(main_module.srv, "run", lambda: calls.append("run"))
+    monkeypatch.setattr(main_module.signal, "signal", lambda *a: None)
+    assert main_module.main([]) == 0
+    assert calls == ["run", "flush", "stop"]

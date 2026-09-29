@@ -20,7 +20,13 @@ from speak_mcp.clips import (
     text_error,
 )
 from speak_mcp.errors import ConfigError
-from speak_mcp.sinks import LocalSink, SpeakResult, TelegramSink, choose_sink
+from speak_mcp.sinks import (
+    LocalSink,
+    SpeakResult,
+    TelegramSink,
+    choose_sink,
+    wait_seconds_from_env,
+)
 from speak_mcp.synth import KokoroSynth, Settings, ensure_models, lang_for
 from speak_mcp.telegram import Telegram
 
@@ -79,7 +85,8 @@ def make_sink() -> LocalSink | TelegramSink:
                 if kind == "local":
                     _sink = LocalSink(synth)
                 else:
-                    _sink = TelegramSink(synth, Telegram.from_env())
+                    _sink = TelegramSink(synth, Telegram.from_env(),
+                                         wait_seconds=wait_seconds_from_env())
     return _sink
 
 
@@ -138,7 +145,8 @@ async def _dispatch(clips: list[Clip], note: str | None, voice: str | None) -> S
 async def speak(text: str, title: str | None = None, voice: str | None = None) -> SpeakResult:
     """Say one piece of text out loud. Local: plays in the background and
     returns immediately. Cloud/Telegram: sends one voice message (caption =
-    title) and returns once it is sent."""
+    title) and returns once it is sent -- or, if that takes longer than the
+    wait limit (default 45s), returns queued=true and keeps sending."""
     err = text_error(text, MAX_TEXT) or label_error(title, "title")
     if err:
         return SpeakResult(ok=False, sink="none", message=err)
@@ -150,7 +158,11 @@ async def speak_clips(clips: list[Clip], note: str | None = None,
                        voice: str | None = None) -> SpeakResult:
     """Say a sequence of independent clips. Local: queued playback in order
     (note is ignored). Telegram: note is sent first as plain text, then one
-    voice message per clip. A failure on one clip never stops the others."""
+    voice message per clip. A failure on one clip never stops the others.
+    Long batches: if delivery takes longer than the wait limit (default 45s,
+    under the client's 60s tool timeout) the call returns queued=true with
+    the clips delivered so far (the rest are marked pending and keep sending
+    in the background). Do not resend on queued=true."""
     err = _validate_clips(clips, note)
     if err:
         return SpeakResult(ok=False, sink="none", message=err)

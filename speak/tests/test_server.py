@@ -330,6 +330,35 @@ def test_make_sink_builds_local_sink_via_make_synth(monkeypatch):
     assert len(built) == 1
 
 
+def _stub_telegram_wiring(monkeypatch):
+    monkeypatch.setattr(server, "_sink", None)
+    monkeypatch.setattr(server, "make_synth", lambda: object())
+    monkeypatch.setattr(server, "choose_sink", lambda: "telegram")
+    monkeypatch.setattr(server.Telegram, "from_env", classmethod(lambda cls: object()))
+
+
+def test_make_sink_passes_speak_wait_seconds_to_the_telegram_sink(monkeypatch):
+    _stub_telegram_wiring(monkeypatch)
+    monkeypatch.setenv("SPEAK_WAIT_SECONDS", "12")
+    sink = server.make_sink()
+    assert isinstance(sink, server.TelegramSink)
+    assert sink._wait == 12.0
+
+
+def test_make_sink_telegram_wait_defaults_to_45(monkeypatch):
+    _stub_telegram_wiring(monkeypatch)
+    monkeypatch.delenv("SPEAK_WAIT_SECONDS", raising=False)
+    assert server.make_sink()._wait == 45.0
+
+
+def test_make_sink_bad_speak_wait_seconds_is_a_config_error(monkeypatch):
+    _stub_telegram_wiring(monkeypatch)
+    monkeypatch.setenv("SPEAK_WAIT_SECONDS", "soon")
+    with pytest.raises(server.ConfigError, match="SPEAK_WAIT_SECONDS"):
+        server.make_sink()
+    assert server._sink is None  # nothing half-built is cached
+
+
 def test_make_sink_does_not_deadlock_on_first_real_call(monkeypatch):
     """Regression for F1: make_sink() used to acquire `_lock` and then call
     make_synth() -- which acquires the *same* plain (non-reentrant) Lock --
