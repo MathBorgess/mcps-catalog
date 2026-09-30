@@ -32,6 +32,19 @@
         "mlx",
         "laya"
       ]
+    },
+    {
+      "name": "laya-computer",
+      "source": "./laya-computer",
+      "description": "Planned desktop execution with local Laya decisions, Cua Driver and minimal caller-owned rescue.",
+      "category": "productivity",
+      "keywords": [
+        "computer-use",
+        "desktop",
+        "cua",
+        "laya",
+        "mlx"
+      ]
     }
   ]
 }

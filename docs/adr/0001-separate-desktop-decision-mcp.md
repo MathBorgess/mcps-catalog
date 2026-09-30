@@ -1,0 +1,3 @@
+# MCP separado para execução desktop com decisões locais
+
+Decisão aceita pelo usuário durante a entrevista: criar um novo MCP neste catálogo, em vez de ampliar o MCP de navegador. O novo servidor usa Laya para decisões tipadas e Cua Driver para observação/execução; o modelo forte fornece o plano antecipado e faz resgates com a menor alteração viável. Essa separação permite desenvolver a política desktop sem impor ao navegador contratos de janelas e acessibilidade nativa. Ela exige definir explicitamente o que será compartilhado: reutilizar a biblioteca de inferência não equivale a copiar a política de formulários web.

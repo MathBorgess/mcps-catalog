@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "goal": "Verify local navigation between Months and Years in Photos.",
+  "app_bundle_id": "com.apple.Photos",
+  "steps": [
+    {
+      "id": "months",
+      "instruction": "Which control selects Months?",
+      "action": "click",
+      "allow_partial_observation": true,
+      "target": {
+        "role": "AXRadioButton"
+      },
+      "success": [
+        {
+          "kind": "selected",
+          "role": "AXRadioButton",
+          "label_contains": "Months"
+        }
+      ],
+      "next_step": "years"
+    },
+    {
+      "id": "years",
+      "instruction": "Which control selects Years?",
+      "action": "click",
+      "allow_partial_observation": true,
+      "target": {
+        "role": "AXRadioButton"
+      },
+      "success": [
+        {
+          "kind": "selected",
+          "role": "AXRadioButton",
+          "label_contains": "Years"
+        }
+      ],
+      "next_step": null
+    }
+  ]
+}

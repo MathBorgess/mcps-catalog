@@ -6,6 +6,7 @@ A public catalog of **[Matheus Borges](https://github.com/MathBorgess)**'s MCP s
 |---|---|---|
 | [`speak`](speak/) | Text → speech (Kokoro-82M, pt-BR by default). Plays on the Mac; sends Telegram voice messages from cloud sessions. | macOS (local) and the Claude Code cloud VM (Ubuntu 24.04 x86_64) |
 | [`ultrafast-browser`](ultrafast-browser/) | The Laya browser-use MCP (`laya-mcp`) from [ultrafast-browser-mcp](https://github.com/MathBorgess/ultrafast-browser-mcp), vendored as a git submodule to pin the version. | macOS only (depends on Apple MLX and a local Chrome) |
+| [`laya-computer`](laya-computer/) | Execute structured desktop plans with local Laya decisions and Cua Driver; caller-owned rescue. | macOS on Apple Silicon; Cua Driver required |
 
 ## Install
 
@@ -13,6 +14,7 @@ A public catalog of **[Matheus Borges](https://github.com/MathBorgess)**'s MCP s
 claude plugin marketplace add MathBorgess/mcps-catalog
 claude plugin install speak@mathborgess-mcps
 claude plugin install ultrafast-browser@mathborgess-mcps
+claude plugin install laya-computer@mathborgess-mcps
 ```
 
 Or, from inside a session:
@@ -21,6 +23,7 @@ Or, from inside a session:
 /plugin marketplace add MathBorgess/mcps-catalog
 /plugin install speak@mathborgess-mcps
 /plugin install ultrafast-browser@mathborgess-mcps
+/plugin install laya-computer@mathborgess-mcps
 ```
 
 This repo is not on Anthropic's official listing, so `claude plugin marketplace add` points straight at the GitHub repo. Update later with `claude plugin marketplace update mathborgess-mcps` and `claude plugin update <name>@mathborgess-mcps`.

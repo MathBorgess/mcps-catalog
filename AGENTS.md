@@ -45,6 +45,9 @@ cd speak && pip install -e . pytest && pytest -q -rs
 python3 scripts/check_pins.py
 python3 -m pytest -q -rs   # root pytest.ini scopes this to tests/
 
+# laya-computer: synthetic portable tests; native UI/model validation is separate
+uv run --project laya-computer pytest -q -rs laya-computer/tests
+
 # any cloud/*.sh setup script, before it ever runs on a real VM
 bash -n cloud/setup.sh
 shellcheck cloud/setup.sh   # if installed; CI doesn't require it but treat a warning as a bug
@@ -52,7 +55,7 @@ shellcheck cloud/setup.sh   # if installed; CI doesn't require it but treat a wa
 
 `-rs` (short test summary for skips) matters here: several tests only run when a real model/espeak-ng is present (`SPEAK_HOME` pointing at installed weights) and otherwise skip — `-rs` is what shows that a skip happened instead of hiding it, which is how CI's `cloud-smoke` job proves the real-synthesis test actually ran unskipped rather than silently passing zero tests.
 
-CI (`.github/workflows/ci.yml`) runs three jobs on every PR: `unit` (the plugin test suites, matrixed across ubuntu-24.04 and macos-14), `pins` (`check_pins.py` plus the root test suite, submodules checked out), and `cloud-smoke` (runs the real `cloud/setup.sh` on ubuntu-24.04 — the same OS/arch as the Claude Code cloud VM — then a real synthesis and the real-synthesis test, unskipped). `cloud-smoke` installs from **this PR's head commit**, not `main`, so a setup-script regression is caught before merge.
+CI (`.github/workflows/ci.yml`) runs four jobs on every PR: `unit` (speak tests, matrixed across ubuntu-24.04 and macos-14), `laya-computer-unit` (synthetic controller/driver/protocol tests on the same platforms, without native model weights), `pins` (`check_pins.py` plus the root test suite, submodules checked out), and `cloud-smoke` (runs the real `cloud/setup.sh` on ubuntu-24.04 — the same OS/arch as the Claude Code cloud VM — then a real synthesis and the real-synthesis test, unskipped). `cloud-smoke` installs from **this PR's head commit**, not `main`, so a setup-script regression is caught before merge.
 
 ## Release / update
 
@@ -65,4 +68,4 @@ There is no version-bump-and-publish step — merging to `main` *is* the release
 
 ## Contributing
 
-Work on a branch and open a pull request against `main`; do not push directly to `main`. Keep the two plugins' concerns separate — a change to `speak` shouldn't touch `ultrafast-browser`'s files or vice versa, and neither should touch `cloud/setup.sh` unless it's actually provisioning something for that plugin.
+Work on a branch and open a pull request against `main`; do not push directly to `main`. Keep the plugins' concerns separate — a change to `speak` shouldn't touch `ultrafast-browser`'s files or vice versa, and neither should touch `cloud/setup.sh` unless it's actually provisioning something for that plugin.
