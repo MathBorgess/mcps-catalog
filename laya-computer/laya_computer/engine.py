@@ -50,6 +50,7 @@ class Run:
         self._decisions = 0
         self._stale_reobservations = 0
         self._rescues = 0
+        self._effects: dict[str, int] = {}
         self._transitions = 0
         self._no_progress = 0
         self._history: list[dict[str, Any]] = []
@@ -163,6 +164,7 @@ class Run:
             if prereq != "satisfied":
                 return self._need_rescue(f"preconditions_{prereq}", step, snapshot)
 
+            effect: str | None = None
             if step.action == Action.VERIFY:
                 outcome = self._evaluate(step.success, snapshot, step.allow_partial_observation)
             else:
@@ -194,6 +196,9 @@ class Run:
                     if self._no_progress >= self.NO_PROGRESS_LIMIT:
                         return self._need_rescue("no_progress", step, snapshot)
                     return self._need_rescue("action_rejected", step, snapshot)
+                effect = str(result.get("effect")) if isinstance(result, dict) and result.get("effect") else None
+                if effect:
+                    self._effects[effect] = self._effects.get(effect, 0) + 1
                 # Even an accepted action is not evidence of success. Observe again.
                 after, stale_count = await self._observe_fresh(step)
                 self._stale_reobservations += stale_count
@@ -229,7 +234,16 @@ class Run:
                 continue
 
             self._verification = "not_satisfied" if outcome == "not_satisfied" else "unknown"
-            self._history_add(step, "unverified", outcome)
+            if effect == "suspected_noop":
+                # The driver itself reported that nothing useful happened and the
+                # postcondition agrees: a known non-effect, so a branch is safe.
+                self._history_add(step, "no_effect", "driver suspected a no-op")
+                self._no_progress += 1
+                if step.on_failure:
+                    self.current_step_id = step.on_failure
+                    continue
+                return self._need_rescue("action_suspected_noop", step, snapshot)
+            self._history_add(step, "unverified", outcome if effect is None else f"{outcome}; effect={effect}")
             self._no_progress += 1
             if outcome == "not_satisfied" and step.on_failure:
                 self.current_step_id = step.on_failure
@@ -319,7 +333,7 @@ class Run:
             if result.get("status") in {"unknown", "timeout", "error"}:
                 self._history_add(step, "effect_unknown", str(result.get("status")))
                 return None, stale_count, "action_effect_unknown"
-            self._history_add(step, "action", "driver returned a non-stale result")
+            self._history_add(step, "action", f"effect={result.get('effect', 'unreported')}")
             return result, stale_count, None
         return None, stale_count, "stale_snapshot_limit"
 
@@ -539,6 +553,7 @@ class Run:
                 "decisions": self._decisions,
                 "stale_reobservations": self._stale_reobservations,
                 "rescues": self._rescues,
+                "effects": dict(self._effects),
                 "elapsed_seconds": round(self._elapsed_active_seconds(), 3),
                 "remote_tokens": None,
             },

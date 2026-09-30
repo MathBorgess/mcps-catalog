@@ -41,6 +41,9 @@ jobs:
           python-version: "3.12"
       - name: install portable test dependencies (no model or native driver)
         run: pip install "mcp==2.2.0" "pydantic>=2.12,<3" "pytest>=8,<9" && pip install --no-deps -e ./laya-computer
+      - name: install the Cua Driver SDK where its embedded runtime is safe to exercise (Linux only)
+        if: runner.os == 'Linux'
+        run: pip install "cua-driver==0.31.0"
       - name: test controller and contracts with synthetic fixtures
         run: cd laya-computer && python -m pytest -q -rs
 

@@ -4,7 +4,7 @@ Execute multi-step desktop plans using **local Laya typed decisions** and **Cua 
 
 ## Requirements and installation
 
-Native execution requires macOS on Apple Silicon, Python 3.12+, `uv`, Cua Driver on `PATH`, and its macOS Accessibility/Screen Recording permissions. Portable unit tests use synthetic observations and do not require Cua, Photos or model weights.
+Native execution requires macOS on Apple Silicon, Python 3.12+, `uv`, and macOS Accessibility/Screen Recording permissions for the process that hosts the driver (see below). The Cua Driver SDK (`cua-driver`, pinned) is a Python dependency and bundles its native runtime; no separate Cua install is needed in embedded mode. Portable unit tests use synthetic observations and do not require Cua, Photos or model weights.
 
 ```bash
 claude plugin marketplace update mathborgess-mcps
@@ -17,11 +17,11 @@ Installation from the default marketplace requires this change to have reached `
 uv run --project laya-computer laya-computer-mcp
 ```
 
-The plugin launches `uvx --from ${CLAUDE_PLUGIN_ROOT} laya-computer-mcp`. The driver is a separate installation: its existing standard-mode `cua-driver mcp` endpoint is kept open through a persistent stdio connection. No permission bypass, daemon replacement, cloud provisioning or automatic driver upgrade is performed.
+The plugin launches `uvx --from ${CLAUDE_PLUGIN_ROOT} laya-computer-mcp`. The server talks to Cua through the typed `cua_driver` SDK (`CuaDriver.call_tool`), not through Cua's MCP endpoint: by default the driver runs **embedded in this process**; with `CUA_DRIVER_SOCKET` set it connects to an already running `cua-driver serve` daemon instead. Embedded mode means macOS attributes Accessibility/Screen Recording to the host process chain, not to `CuaDriver.app`; if grants are missing (`permissions_pending`), either grant them to that process or use the daemon, which keeps the identity that already holds them. No permission bypass, cloud provisioning or automatic driver upgrade is performed. Cua sends content-free product telemetry by default; run `cua-driver telemetry disable` to stop it.
 
 | Environment | Default | Purpose |
 |---|---|---|
-| `CUA_DRIVER_COMMAND` | `cua-driver` | Driver executable path (one executable, not a shell command) |
+| `CUA_DRIVER_SOCKET` | unset (embedded) | Unix socket of a running `cua-driver serve` daemon; unset runs the SDK embedded |
 | `LAYA_MODEL` | `aac6fef/laya-typed-decisions-mlx` | Concrete local MLX checkpoint |
 
 The checkpoint loads lazily and stays in memory. The first load may download weights and compile Metal kernels. Model work is serialized on one worker thread. Local tokens do not imply total task cost is zero.
@@ -63,7 +63,7 @@ Synthetic example (not a real app selector):
 }
 ```
 
-Default hard ceilings: 60 actions, 300 seconds of active execution and one rescue. A plan may lower `max_actions`, `max_seconds` or `max_rescues`. Rescue pauses do not consume active execution time; resume does not reset consumed budgets. Each action is followed by fresh observation. Obsolete snapshots allow bounded reobservation; uncertain mutations are never blindly retried.
+Default hard ceilings: 60 actions, 300 seconds of active execution and one rescue. A plan may lower `max_actions`, `max_seconds` or `max_rescues`. Rescue pauses do not consume active execution time; resume does not reset consumed budgets. Each action is followed by fresh observation, and Cua's own action receipt (`effect`: `confirmed`, `partial`, `unverifiable`, `suspected_noop`; `refused` is a certain, pre-dispatch failure) is kept in the history and in `metrics.effects`. A receipt never replaces the predicates: `unverifiable`/`partial` still need verification, and `suspected_noop` with unmet predicates is a known non-effect that may follow `on_failure`. Obsolete snapshots allow bounded reobservation; uncertain mutations are never blindly retried.
 
 ## Rescue and evaluation
 

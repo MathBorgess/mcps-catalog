@@ -200,6 +200,18 @@ wheels = [
 ]
 
 [[package]]
+name = "cua-driver"
+version = "0.31.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/a2/cdf66c0c4bedd2ea16516136d8844b89769e8b24bce7bce3fefa914f8fe0/cua_driver-0.31.0-py3-none-macosx_13_0_universal2.whl", hash = "sha256:ba48a3bef50c55285ef9b71f8e7b6df509ed3fee46b7ab0869cbccf6efd6b35b", size = 43535601, upload-time = "2026-09-30T16:49:12.807Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/7c/1d251a1b55d4dc7c0a8aeda088ee4d0ce9243f6d0fbc85ff1644736d60d6/cua_driver-0.31.0-py3-none-manylinux_2_31_aarch64.whl", hash = "sha256:7ee3710fb77d9b77fb5fa0cfc7ca6e3992f9e29e1676390d983b0f4e8cc6debb", size = 32568671, upload-time = "2026-09-30T16:49:15.87Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/ba/22ba42ebe817db1360995107962f4cda58f1c5c691e8fd83c0fc29947cc7/cua_driver-0.31.0-py3-none-manylinux_2_31_x86_64.whl", hash = "sha256:60c21aa647fb62380faf7402514504058fd1404ec1e95cac26cda98df4348724", size = 32201932, upload-time = "2026-09-30T16:49:18.806Z" },
+    { url = "https://files.pythonhosted.org/packages/37/2d/5c8ad956b337c0c340738e61f8bb6c6eba81f48661aa03b192244fb0ac73/cua_driver-0.31.0-py3-none-win_amd64.whl", hash = "sha256:3d84e1608eae88097e7234d207a56fde102c0ca0af56f74dde466bc7642288b1", size = 28376375, upload-time = "2026-09-30T16:49:22.042Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/9e/9b62e796ea1068c40633b7f4d24191566927fe728cbbf214443247a28aa0/cua_driver-0.31.0-py3-none-win_arm64.whl", hash = "sha256:284e975df61e39b7114283e62612a0bb0376d8305710932aa7162deb56cabb7a", size = 26512290, upload-time = "2026-09-30T16:49:24.889Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "4.0.7"
 source = { registry = "https://pypi.org/simple" }
@@ -373,6 +385,7 @@ name = "laya-computer-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cua-driver" },
     { name = "laya-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "mcp" },
     { name = "pydantic" },
@@ -386,6 +399,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cua-driver", specifier = "==0.31.0" },
     { name = "laya-mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.1,<0.2" },
     { name = "mcp", specifier = "==2.2.0" },
     { name = "pydantic", specifier = ">=2.12,<3" },
