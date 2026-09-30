@@ -7,6 +7,8 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .obstacles import is_destructive
+
 
 class Action(StrEnum):
     CLICK = "click"
@@ -108,6 +110,26 @@ class Step(BaseModel):
         return self
 
 
+class ObstaclePolicy(BaseModel):
+    """What the controller may dismiss by itself when a blocking prompt explains a failure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dismiss_labels: list[str] = Field(default_factory=list, max_length=20)
+    max_dismissals: int = Field(default=3, ge=0, le=5)
+
+    @model_validator(mode="after")
+    def labels_are_safe(self) -> Self:
+        for label in self.dismiss_labels:
+            if not label.strip() or len(label) > 60:
+                raise ValueError("dismiss_labels need 1-60 characters")
+            if is_destructive(label):
+                raise ValueError(
+                    f"dismiss label {label!r} could change data or grant access; make it an explicit plan step"
+                )
+        return self
+
+
 class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -119,6 +141,7 @@ class Plan(BaseModel):
     max_actions: int = Field(default=60, ge=1, le=60)
     max_seconds: float = Field(default=300, gt=0, le=300)
     max_rescues: int = Field(default=1, ge=0, le=1)
+    obstacles: ObstaclePolicy = Field(default_factory=ObstaclePolicy)
 
     @model_validator(mode="after")
     def references_are_valid(self) -> Self:

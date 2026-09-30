@@ -6,7 +6,12 @@ import asyncio
 import time
 from typing import Any, Protocol
 
+from .obstacles import find_obstacle, label_key
 from .plan import Action, Plan, Predicate, PredicateKind, Selector, Step
+
+OBSTACLE_INSTRUCTION = (
+    "Which control closes this notice without confirming a change, granting access, or touching user data?"
+)
 
 
 class Driver(Protocol):
@@ -51,6 +56,10 @@ class Run:
         self._stale_reobservations = 0
         self._rescues = 0
         self._effects: dict[str, int] = {}
+        self._dismissals = 0
+        self._dismissed_ok = 0
+        self._dismiss_limit = plan.obstacles.max_dismissals
+        self._obstacle_summary: dict[str, Any] | None = None
         self._transitions = 0
         self._no_progress = 0
         self._history: list[dict[str, Any]] = []
@@ -111,6 +120,7 @@ class Run:
             self._action_limit = min(self._action_limit, new_plan.max_actions)
             self._time_limit = min(self._time_limit, new_plan.max_seconds)
             self._rescue_limit = min(self._rescue_limit, new_plan.max_rescues)
+            self._dismiss_limit = min(self._dismiss_limit, new_plan.obstacles.max_dismissals)
             self.current_step_id = new_plan.start_step or self.current_step_id
             self.plan = new_plan
             self._stop_requested = False
@@ -162,7 +172,10 @@ class Run:
 
             prereq = self._evaluate(step.preconditions, snapshot, step.allow_partial_observation)
             if prereq != "satisfied":
-                return self._need_rescue(f"preconditions_{prereq}", step, snapshot)
+                handled, rescue = await self._dismiss_obstacle(step, snapshot)
+                if handled:
+                    continue
+                return rescue or self._need_rescue(f"preconditions_{prereq}", step, snapshot)
 
             effect: str | None = None
             if step.action == Action.VERIFY:
@@ -170,6 +183,12 @@ class Run:
             else:
                 chosen, choice_error = await self._choose_target(step, snapshot)
                 if choice_error:
+                    if choice_error == "target_not_found":
+                        handled, rescue = await self._dismiss_obstacle(step, snapshot)
+                        if handled:
+                            continue
+                        if rescue:
+                            return rescue
                     return self._need_rescue(choice_error, step, snapshot)
                 if self._stop_requested:
                     self._status = "stopped"
@@ -256,6 +275,94 @@ class Run:
         self._status = "completed"
         self._verification = "satisfied"
         return self._result()
+
+    async def _dismiss_obstacle(
+        self, step: Step, snapshot: dict[str, Any]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Try to clear a blocking prompt that explains a failure the plan did not expect.
+
+        Returns ``(True, None)`` after a *verified* dismissal (the caller re-runs the step
+        from a fresh observation), ``(False, None)`` when there is nothing to do, and
+        ``(False, result)`` when the prompt needs the caller (limit reached, no allowed
+        button, or the dismissal failed). Only allow-listed, non-destructive labels are
+        ever pressed; Laya merely picks among several of them.
+        """
+        policy = self.plan.obstacles
+        if policy.max_dismissals == 0:
+            return False, None
+        extra = set(policy.dismiss_labels)
+        obstacle = find_obstacle(snapshot, extra)
+        if obstacle is None:
+            return False, None
+        self._obstacle_summary = obstacle.summary()
+        if self._dismissals >= self._dismiss_limit:
+            return False, self._need_rescue("obstacle_limit", step, snapshot)
+        if not obstacle.allowed:
+            return False, self._need_rescue("obstacle_needs_decision", step, snapshot)
+
+        if len(obstacle.allowed) == 1:
+            chosen = obstacle.allowed[0]
+        else:
+            self._decisions += 1
+            candidates = [self._public_candidate(item) for item in obstacle.allowed]
+            try:
+                chosen_id = await self.decider.choose(OBSTACLE_INSTRUCTION, candidates, self._public_snapshot(snapshot))
+            except Exception:  # noqa: BLE001 - a failed local decision pauses the plan
+                return False, self._need_rescue("obstacle_decision_failed", step, snapshot)
+            chosen = next((item for item in obstacle.allowed if str(item.get("id")) == str(chosen_id)), None)
+            if chosen is None:
+                return False, self._need_rescue("decider_returned_unobserved_candidate", step, snapshot)
+        if self._stop_requested:
+            self._status = "stopped"
+            return False, self._result()
+
+        label = str(chosen.get("label", ""))
+        self._dismissals += 1
+        dismiss = Step(
+            id=f"obstacle-{self._dismissals}",
+            instruction=OBSTACLE_INSTRUCTION,
+            action=Action.CLICK,
+            target=Selector(role=chosen.get("role"), label_contains=label),
+            success=[Predicate(kind=PredicateKind.EXISTS, label_contains=label)],
+            window_title=step.window_title,
+            allow_partial_observation=step.allow_partial_observation,
+        )
+        result, stale_count, act_error = await self._act_fresh(dismiss, chosen, snapshot)
+        self._stale_reobservations += stale_count
+        if act_error:
+            if act_error == "stopped":
+                self._status = "stopped"
+                return False, self._result()
+            if act_error in {"action_limit", "time_limit"}:
+                self._status = "blocked"
+                self._verification = "unknown"
+                self._last_reason = act_error
+                return False, self._result()
+            return False, self._need_rescue(act_error, step, snapshot)
+        if result is not None and result.get("status") in {"rejected", "failed_no_effect"}:
+            self._history_add(step, "no_effect", f"obstacle button {label!r} refused")
+            return False, self._need_rescue("obstacle_not_dismissed", step, snapshot)
+
+        after, stale_count = await self._observe_fresh(step)
+        self._stale_reobservations += stale_count
+        if after is None:
+            return False, self._need_rescue("post_action_observation_failed", step, snapshot)
+        evidence_error = self._evidence_error(after, step.allow_partial_observation)
+        if evidence_error:
+            return False, self._need_rescue(evidence_error, step, after)
+        remaining = find_obstacle(after, extra)
+        if remaining is not None and any(
+            label_key(b.get("label")) == label_key(label) for b in remaining.allowed
+        ):
+            self._history_add(step, "unverified", f"obstacle button {label!r} still present")
+            return False, self._need_rescue("obstacle_not_dismissed", step, after)
+        effect = str(result.get("effect")) if isinstance(result, dict) and result.get("effect") else None
+        if effect:
+            self._effects[effect] = self._effects.get(effect, 0) + 1
+        self._dismissed_ok += 1
+        self._history_add(step, "obstacle_dismissed", label)
+        self._obstacle_summary = None
+        return True, None
 
     async def _observe_fresh(self, step: Step) -> tuple[dict[str, Any] | None, int]:
         stale_count = 0
@@ -511,6 +618,9 @@ class Run:
             "recent_effects": self._history[-4:],
             "instruction": "Resolve the blocker with the smallest plan repair. Preserve goal, app, constraints, and completed steps.",
         }
+        if self._obstacle_summary:
+            self._rescue_context["obstacle"] = self._obstacle_summary
+            self._obstacle_summary = None
         return self._result()
 
     def _limit_reason(self) -> str | None:
@@ -554,6 +664,8 @@ class Run:
                 "stale_reobservations": self._stale_reobservations,
                 "rescues": self._rescues,
                 "effects": dict(self._effects),
+                "obstacles_dismissed": self._dismissed_ok,
+                "obstacle_attempts": self._dismissals,
                 "elapsed_seconds": round(self._elapsed_active_seconds(), 3),
                 "remote_tokens": None,
             },
