@@ -323,3 +323,35 @@ def test_stop_requested_during_target_decision_prevents_the_pending_action():
         assert driver.action_calls == []
 
     asyncio.run(run())
+
+
+def test_suspected_noop_with_unmet_predicate_is_a_known_noop_not_a_blind_retry():
+    driver = FakeDriver([snapshot()], actions=[{"status": "accepted", "effect": "suspected_noop"}])
+    result = asyncio.run(Run(plan(), driver, FirstDecider()).execute())
+    assert result["status"] == "rescue_needed" and result["reason"] == "action_suspected_noop"
+    assert len(driver.action_calls) == 1
+    assert result["metrics"]["effects"] == {"suspected_noop": 1}
+    assert result["rescue_context"]["recent_effects"][-1]["effect"] == "no_effect"
+
+
+def test_suspected_noop_follows_on_failure_branch():
+    steps = [
+        {"id": "open", "instruction": "Open the Details button", "action": "click",
+         "target": {"role": "button", "label_contains": "Details"}, "on_failure": "retry-by-key",
+         "success": [{"kind": "exists", "role": "window", "label_contains": "Information"}]},
+        {"id": "retry-by-key", "instruction": "Use the shortcut", "action": "press_key", "key": "cmd+i",
+         "success": [{"kind": "exists", "role": "window", "label_contains": "Information"}]},
+    ]
+    driver = FakeDriver([snapshot(), snapshot(), snapshot(), snapshot(details=True)],
+                        actions=[{"effect": "suspected_noop"}, {"effect": "confirmed"}])
+    result = asyncio.run(Run(plan(steps=steps), driver, FirstDecider()).execute())
+    assert result["status"] == "completed"
+    assert [c[0] for c in driver.action_calls] == ["click", "press_key"]
+
+
+def test_unverifiable_effect_still_requires_verification_and_never_counts_as_success():
+    driver = FakeDriver([snapshot()], actions=[{"effect": "unverifiable"}])
+    result = asyncio.run(Run(plan(), driver, FirstDecider()).execute())
+    assert result["status"] == "rescue_needed" and result["verification"] != "satisfied"
+    driver = FakeDriver([snapshot(), snapshot(details=True)], actions=[{"effect": "unverifiable"}])
+    assert asyncio.run(Run(plan(), driver, FirstDecider()).execute())["status"] == "completed"
