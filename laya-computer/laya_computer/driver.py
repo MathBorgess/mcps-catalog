@@ -1,8 +1,12 @@
-"""Persistent stdio adapter for the installed Cua Driver MCP server.
+"""Adapter for the Cua Driver SDK (``cua_driver``).
 
 The module deliberately has no platform-native imports.  It can therefore be
-imported on Linux, while the native Cua Driver process is only started when a
-driver instance is started.
+imported on Linux and in portable tests, while the native runtime is only
+loaded when a driver instance is started.  By default the SDK runs the driver
+*embedded* in this process; set ``CUA_DRIVER_SOCKET`` to talk to an already
+running ``cua-driver serve`` daemon instead (useful on macOS, where the
+Accessibility and Screen Recording grants belong to the process that hosts the
+driver).
 """
 
 from __future__ import annotations
@@ -11,7 +15,6 @@ import asyncio
 import json
 import os
 import re
-from dataclasses import dataclass
 from typing import Any, Protocol
 
 
@@ -29,88 +32,42 @@ class _Transport(Protocol):
     async def close(self) -> None: ...
 
 
-@dataclass
-class _Request:
-    tool: str
-    arguments: dict[str, Any]
-    future: asyncio.Future[dict[str, Any]]
+class _SdkTransport:
+    """Call Cua tools through the typed SDK; tool errors arrive as ``ToolResult``s."""
 
+    def __init__(self, *, socket_path: str | None = None, driver: Any = None):
+        self.socket_path = socket_path
+        self._driver = driver
 
-class _StdioTransport:
-    """Own the MCP AnyIO context in one long-lived asyncio task."""
+    async def _ensure_driver(self) -> Any:
+        if self._driver is None:
+            try:
+                # Imported lazily: the SDK bundles a native library, and the
+                # portable unit tests never need it.
+                import cua_driver
 
-    def __init__(self, command: str, *, timeout: float):
-        self.command = command
-        self.timeout = timeout
-        self._queue: asyncio.Queue[_Request | None] = asyncio.Queue()
-        self._ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._worker = asyncio.create_task(self._run(), name="laya-cua-mcp-stdio")
+                self._driver = await asyncio.to_thread(
+                    cua_driver.CuaDriver.connect if self.socket_path else cua_driver.CuaDriver.create,
+                    *([self.socket_path] if self.socket_path else []),
+                )
+            except Exception as exc:  # noqa: BLE001 - surfaced as a bounded driver error
+                raise _transport_error(exc) from exc
+        return self._driver
 
     async def request(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        await asyncio.shield(self._ready)
-        if self._worker.done():
-            raise DriverError("transport_closed", "Cua MCP transport has ended")
-        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        await self._queue.put(_Request(tool, arguments, future))
-        return await future
+        driver = await self._ensure_driver()
+        try:
+            result = await driver.call_tool(tool, json.dumps(arguments))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - infrastructure failure, not a tool result
+            raise _transport_error(exc) from exc
+        return _normalize_tool_result(result)
 
     async def close(self) -> None:
-        if self._worker.done():
-            return
-        await self._queue.put(None)
-        try:
-            await asyncio.wait_for(asyncio.shield(self._worker), self.timeout + 2)
-        except asyncio.TimeoutError:
-            self._worker.cancel()
-            await asyncio.gather(self._worker, return_exceptions=True)
-
-    async def _run(self) -> None:
-        try:
-            # Import lazily so importing this package does not require MCP or a
-            # native Cua installation (for example in Linux-only unit tests).
-            from mcp import ClientSession
-            from mcp.client.stdio import StdioServerParameters, stdio_client
-
-            params = StdioServerParameters(command=self.command, args=["mcp"])
-            async with stdio_client(params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await asyncio.wait_for(session.initialize(), self.timeout)
-                    if not self._ready.done():
-                        self._ready.set_result(None)
-                    while True:
-                        request = await self._queue.get()
-                        if request is None:
-                            break
-                        if request.future.cancelled():
-                            continue
-                        try:
-                            result = await asyncio.wait_for(
-                                session.call_tool(request.tool, request.arguments),
-                                timeout=self.timeout,
-                            )
-                            if not request.future.done():
-                                request.future.set_result(_normalize_result(result))
-                        except asyncio.TimeoutError:
-                            if not request.future.done():
-                                request.future.set_exception(
-                                    DriverError("timeout", f"Cua Driver {request.tool} timed out")
-                                )
-                        except Exception as exc:
-                            if not request.future.done():
-                                request.future.set_exception(_transport_error(exc))
-        except Exception as exc:
-            error = _transport_error(exc)
-            if not self._ready.done():
-                self._ready.set_exception(error)
-            while not self._queue.empty():
-                request = self._queue.get_nowait()
-                if request is not None and not request.future.done():
-                    request.future.set_exception(error)
-        finally:
-            if not self._ready.done():
-                self._ready.set_exception(
-                    DriverError("transport_closed", "Cua Driver MCP transport closed")
-                )
+        driver, self._driver = self._driver, None
+        if driver is not None:
+            await driver.shutdown()
 
 
 _MUTATING_TOOLS = {"click", "double_click", "set_value", "press_key", "scroll", "invoke_menu"}
@@ -127,81 +84,87 @@ def _transport_error(exc: BaseException) -> DriverError:
     return DriverError("transport_error", str(exc) or type(exc).__name__)
 
 
-def _plain(value: Any) -> Any:
-    """Convert MCP/Pydantic response objects into ordinary Python values."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(k): _plain(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain(v) for v in value]
-    if hasattr(value, "model_dump"):
-        return _plain(value.model_dump(by_alias=True, exclude_none=True))
-    if hasattr(value, "__dict__"):
-        return _plain(vars(value))
-    return value
+def _enum_name(value: Any) -> str:
+    """``ActionEffect.CONFIRMED`` -> ``confirmed`` (works for any SDK enum)."""
+    return str(getattr(value, "name", value)).lower()
 
 
-def _normalize_result(result: Any) -> dict[str, Any]:
-    """Unwrap the MCP result envelope, including JSON text fallbacks."""
-    plain = _plain(result)
-    if isinstance(plain, dict) and plain.get("isError"):
-        message = _error_text(plain)
-        stale = bool(_STALE_RE.search(message))
+def _action_fields(action: Any) -> dict[str, Any]:
+    """Flatten the SDK's typed ``ActionResult`` into compact, JSON-safe fields."""
+    fields: dict[str, Any] = {"effect": _enum_name(action.effect), "route": _enum_name(action.route)}
+    delivery = getattr(action, "delivery", None)
+    if delivery is not None:
+        fields["delivery_mode"] = _enum_name(delivery.mode)
+    escalation = getattr(action, "escalation", None)
+    if escalation is not None:
+        fields["escalation"] = {"target": _enum_name(escalation.target), "reason": _enum_name(escalation.reason)}
+    evidence = getattr(action, "evidence", None)
+    if evidence:
+        fields["evidence"] = [{"kind": _enum_name(item.kind), "detail": str(item.detail or "")[:120]}
+                              for item in evidence[:4]]
+    error = getattr(action, "error", None)
+    if error is not None:
+        fields["error"] = {"code": str(error.code), "hint": str(error.hint or "")}
+    if getattr(action, "summary", None):
+        fields["summary"] = str(action.summary)[:200]
+    return fields
+
+
+def _normalize_tool_result(result: Any) -> dict[str, Any]:
+    """Turn an SDK ``ToolResult`` into a plain dict, or raise a bounded ``DriverError``.
+
+    ``call_tool`` does not raise for tool-level failures: they come back with
+    ``is_error`` set, an optional machine ``error_code`` and, for refusals, a
+    structured ``{"refusal": {"code", "message"}}`` body.
+    """
+    structured: Any = None
+    raw = getattr(result, "structured_json", None)
+    if raw:
+        try:
+            structured = json.loads(raw)
+        except ValueError:
+            structured = None
+    text = str(getattr(result, "text", "") or "")
+
+    if getattr(result, "is_error", False):
+        code = getattr(result, "error_code", None)
+        message = text
+        refusal = structured.get("refusal") if isinstance(structured, dict) else None
+        if isinstance(refusal, dict):
+            code = code or refusal.get("code")
+            message = str(refusal.get("message") or message)
+        stale = code is None and bool(_STALE_RE.search(message))
         raise DriverError(
-            "stale_snapshot" if stale else "driver_error",
+            "stale_snapshot" if stale or code == "element_token_stale" else str(code or "driver_error"),
             message or "Cua Driver returned an error",
             uncertain=False,
         )
 
-    if isinstance(plain, dict):
-        structured = plain.get("structuredContent", plain.get("structured_content"))
-        if structured is not None:
-            data = _plain(structured)
-            if isinstance(data, dict):
-                return _unwrap_payload(data)
-            return {"result": data}
-        content = plain.get("content")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text", "")
-                    try:
-                        parsed = json.loads(text)
-                    except (TypeError, json.JSONDecodeError):
-                        return {"text": text}
-                    if isinstance(parsed, dict):
-                        return _unwrap_payload(parsed)
-                    return {"result": parsed}
-            return {"content": content}
-        return _unwrap_payload(plain)
-    return {"result": plain}
+    data: dict[str, Any]
+    if isinstance(structured, dict):
+        data = dict(structured)
+    elif structured is not None:
+        data = {"result": structured}
+    else:
+        data = {"text": text}
+    action = getattr(result, "action", None)
+    if action is not None:
+        data.update(_action_fields(action))
+    return _unwrap_payload(data)
 
 
 def _unwrap_payload(data: dict[str, Any]) -> dict[str, Any]:
-    # Some Cua builds expose a conventional {result: {...}} wrapper in
-    # structuredContent. Preserve metadata while making the actual payload
-    # straightforward to consume.
+    # A refused action never reached an actuator, so it is certain, not uncertain.
     if data.get("status") == "refused" or data.get("effect") == "refused" or data.get("refusal"):
-        refusal = data.get("refusal") or {}
-        raise DriverError(str(refusal.get("code", data.get("code", "refused"))),
-                          str(refusal.get("message", data.get("reason", "Cua refused before execution"))))
+        refusal = data.get("refusal") or data.get("error") or {}
+        raise DriverError(
+            str(refusal.get("code", data.get("code", "refused"))),
+            str(refusal.get("message") or refusal.get("hint") or data.get("reason") or "Cua refused before execution"),
+        )
     nested = data.get("result")
     if isinstance(nested, dict) and len(data) <= 3:
         return _unwrap_payload({**nested, **{k: v for k, v in data.items() if k != "result"}})
     return data
-
-
-def _error_text(payload: dict[str, Any]) -> str:
-    messages: list[str] = []
-    for block in payload.get("content", []) or []:
-        block = _plain(block)
-        if isinstance(block, dict) and block.get("text"):
-            messages.append(str(block["text"]))
-    structured = payload.get("structuredContent") or payload.get("structured_content")
-    if isinstance(structured, dict):
-        messages.extend(str(structured[k]) for k in ("message", "error", "code") if structured.get(k))
-    return "; ".join(messages) or str(payload.get("error", ""))
 
 
 def _without_images(data: dict[str, Any]) -> dict[str, Any]:
@@ -231,13 +194,13 @@ def _element_label(element: dict[str, Any]) -> str:
 
 
 class CuaDriver:
-    """Bind and operate one application window through a persistent MCP client."""
+    """Bind and operate one application window through the Cua Driver SDK."""
 
-    def __init__(self, *, command: str | None = None, timeout: float = 30.0,
+    def __init__(self, *, socket_path: str | None = None, timeout: float = 30.0,
                  transport: _Transport | None = None):
         if timeout <= 0:
             raise ValueError("timeout must be positive")
-        self.command = command or os.environ.get("CUA_DRIVER_COMMAND", "cua-driver")
+        self.socket_path = socket_path or os.environ.get("CUA_DRIVER_SOCKET") or None
         self.timeout = timeout
         self._injected_transport = transport
         self._transport: _Transport | None = None
@@ -253,7 +216,7 @@ class CuaDriver:
         if self._transport is not None:
             raise DriverError("already_started", "Cua driver is already started")
         self.bundle_id = bundle_id
-        self._transport = self._injected_transport or _StdioTransport(self.command, timeout=self.timeout)
+        self._transport = self._injected_transport or _SdkTransport(socket_path=self.socket_path)
 
         if pid is None:
             launched = await self._call("launch_app", {"bundle_id": bundle_id})
