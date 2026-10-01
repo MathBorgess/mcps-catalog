@@ -29,6 +29,21 @@ jobs:
       - name: install and test the speak package
         run: cd speak && pip install -e . pytest && pytest -q -rs
 
+  laya-computer-unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install portable test dependencies (no model or native driver)
+        run: pip install "mcp==2.2.0" "pydantic>=2.12,<3" "pytest>=8,<9" && pip install --no-deps -e ./laya-computer
+      - name: test controller and contracts with synthetic fixtures
+        run: cd laya-computer && python -m pytest -q -rs
+
   pins:
     runs-on: ubuntu-24.04
     steps:

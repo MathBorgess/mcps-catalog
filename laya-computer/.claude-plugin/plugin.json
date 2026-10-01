@@ -1,0 +1,22 @@
+{
+  "name": "laya-computer",
+  "version": "0.1.0",
+  "description": "Planned desktop execution with local Laya decisions, Cua Driver and minimal caller-owned rescue.",
+  "author": {
+    "name": "Matheus Borges",
+    "url": "https://github.com/MathBorgess"
+  },
+  "homepage": "https://github.com/MathBorgess/mcps-catalog",
+  "repository": "https://github.com/MathBorgess/mcps-catalog",
+  "license": "MIT",
+  "mcpServers": {
+    "laya-computer": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "laya-computer-mcp"
+      ]
+    }
+  }
+}
