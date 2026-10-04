@@ -31,6 +31,7 @@ The checkpoint loads lazily and stays in memory. The first load may download wei
 | Tool | Purpose |
 |---|---|
 | `inspect(app_bundle_id, window_title?, query?, include_schema=false)` | Initial compact accessibility observation; optional label projection and plan schema |
+| `preflight_plan(plan)` | Assess a candidate plan statically without observing or acting on the desktop |
 | `run_plan(plan)` | Start a bounded local run and return its ID |
 | `get_run(run_id, wait_seconds=30)` | Wait for completion/state without reobserving the UI |
 | `resume_plan(run_id, expected_version, plan)` | Resume `rescue_needed` with a versioned minimal repair |

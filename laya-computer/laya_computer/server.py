@@ -12,6 +12,7 @@ from .decider import LayaDecider
 from .driver import CuaDriver
 from .engine import Run
 from .plan import Plan
+from .preflight import analyze_preflight_plan
 
 INSTRUCTIONS = """You supply a complete structured plan with observable success predicates.
 Use inspect once to ground the plan. The local controller and Laya then execute multiple
@@ -258,6 +259,12 @@ async def inspect(app_bundle_id: str, window_title: str | None = None,
                   query: str | None = None, include_schema: bool = False) -> dict:
     """Ground a plan in compact AX data. Query projects labels; schema is opt-in."""
     return await manager.inspect(app_bundle_id, window_title, query, include_schema)
+
+
+@srv.tool()
+async def preflight_plan(plan: dict) -> dict:
+    """Assess a candidate plan without observing or acting on the desktop."""
+    return analyze_preflight_plan(plan)
 
 
 @srv.tool()
