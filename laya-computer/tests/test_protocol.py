@@ -16,7 +16,7 @@ def test_stdio_tool_discovery_and_validation():
                 assert initialized.server_info.name == "laya-computer"
                 tools = await session.list_tools()
                 assert {t.name for t in tools.tools} == {
-                    "inspect", "run_plan", "get_run", "resume_plan", "stop_run"
+                    "inspect", "run_plan", "get_run", "resume_plan", "stop_run", "preflight_plan"
                 }
                 result = await session.call_tool("run_plan", {"plan": {"goal": "invalid"}})
                 assert result.is_error
