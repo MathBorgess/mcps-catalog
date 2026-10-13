@@ -1,12 +1,13 @@
 [project]
 name = "speak-mcp"
-version = "0.1.2"
-description = "Text-to-speech MCP server: Kokoro TTS locally, Telegram voice messages from cloud sessions."
+version = "0.2.0"
+description = "Text-to-speech MCP server: Qwen3-TTS 1.7B MLX 4-bit on Apple Silicon, local playback or Telegram."
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "kokoro-onnx==0.6.1",
-    "onnxruntime==1.30.0",
+    "mlx-audio==0.5.8; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "numpy>=1.26.4",
+    "huggingface-hub==2.2.0",
     "soundfile==0.14.0",
     "mcp==2.2.0",
     "httpx==0.28.1",

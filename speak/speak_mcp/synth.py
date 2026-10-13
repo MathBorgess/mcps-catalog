@@ -1,53 +1,35 @@
-"""Kokoro TTS with system espeak-ng: settings, model download, synth, OGG/WAV encode."""
+"""Pinned Qwen3-TTS 1.7B CustomVoice, MLX 4-bit; no alternate TTS backend."""
 
-import ctypes.util
+import hashlib
 import io
+import json
 import os
-import time
-import urllib.error
-import urllib.request
+import platform
+import sys
+import threading
 from collections.abc import Mapping
+from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import soundfile as sf
 
 from speak_mcp.errors import ConfigError
 
-VOICE_LANG = {
-    "p": "pt-br",
-    "a": "en-us",
-    "b": "en-gb",
-    "e": "es",
-    "f": "fr-fr",
-    "i": "it",
-    "j": "ja",
-    "z": "cmn",
-    "h": "hi",
-}
-
-MODEL = "kokoro-v1.0.int8.onnx"
-VOICES_FILE = "voices-v1.0.bin"
-MODEL_SIZES = {MODEL: 114119327, VOICES_FILE: 28214398}
-MODEL_BASE_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1"
-
-ESPEAK_DATA_DIRS = (
-    "/usr/lib/x86_64-linux-gnu/espeak-ng-data",
-    "/usr/lib/aarch64-linux-gnu/espeak-ng-data",
-    "/usr/share/espeak-ng-data",
-    "/opt/homebrew/share/espeak-ng-data",
-    "/usr/local/share/espeak-ng-data",
-)
+MANIFEST = json.loads(Path(__file__).with_name("model_manifest.json").read_text())
+MODEL = "qwen3-tts-1.7b-customvoice-4bit"
+MODEL_ID = MANIFEST["repo"]
+MODEL_REVISION = MANIFEST["revision"]
+LANGUAGES = {x.lower(): x for x in (
+    "Portuguese", "English", "Chinese", "Japanese", "Korean", "German",
+    "French", "Russian", "Spanish", "Italian", "Auto",
+)}
 
 
-def lang_for(voice: str) -> str:
-    prefix = voice[:1]
-    try:
-        return VOICE_LANG[prefix]
-    except KeyError:
-        raise ConfigError(f"unknown voice prefix: {voice!r}") from None
+def require_mlx_platform() -> None:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        raise ConfigError("Qwen3-TTS via MLX requires macOS on Apple Silicon (arm64); no fallback backend")
 
 
 @dataclass(frozen=True)
@@ -55,104 +37,75 @@ class Settings:
     home: Path
     voice: str
     speed: float
+    language: str = "Portuguese"
+    instruct: str = "Speak naturally and clearly in Brazilian Portuguese."
 
     @property
     def model_path(self) -> Path:
         return self.home / "models" / MODEL
 
-    @property
-    def voices_path(self) -> Path:
-        return self.home / "models" / VOICES_FILE
-
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "Settings":
-        voice = env.get("SPEAK_VOICE") or "pf_dora"
-        lang_for(voice)  # only the prefix is validated here; full voice list is checked at synth time
+        voice = (env.get("SPEAK_VOICE") or "serena").lower()
         try:
             speed = float(env.get("SPEAK_SPEED") or "1.0")
         except ValueError:
             raise ConfigError("SPEAK_SPEED must be a number") from None
         if not 0.7 <= speed <= 1.5:
             raise ConfigError("SPEAK_SPEED must be 0.7-1.5")
-        home_env = env.get("SPEAK_HOME")
-        if home_env:
-            home = Path(home_env)
-        elif Path("/opt/speak").is_dir():
-            home = Path("/opt/speak")
-        else:
-            home = Path.home() / ".cache" / "speak-mcp"
-        return cls(home, voice, speed)
+        language = LANGUAGES.get((env.get("SPEAK_LANGUAGE") or "Portuguese").lower())
+        if language is None:
+            raise ConfigError(f"unsupported SPEAK_LANGUAGE: {env.get('SPEAK_LANGUAGE')!r}")
+        default_instruct = "Speak naturally and clearly in Brazilian Portuguese." if language == "Portuguese" else "Speak naturally and clearly."
+        return cls(
+            Path(env.get("SPEAK_HOME") or Path.home() / ".cache" / "speak-mcp"),
+            voice, speed, language, env.get("SPEAK_INSTRUCT", default_instruct),
+        )
 
 
-def resolve_espeak(env: Mapping[str, str] = os.environ) -> tuple[str, str]:
-    # Validate explicit SPEAK_ESPEAK_DATA override (if set, must exist)
-    data_override = env.get("SPEAK_ESPEAK_DATA")
-    if data_override and not Path(data_override).is_dir():
-        raise ConfigError(f"SPEAK_ESPEAK_DATA directory not found: {data_override}")
-
-    # Validate explicit SPEAK_ESPEAK_LIB override (if set and is a path, must exist)
-    lib_override = env.get("SPEAK_ESPEAK_LIB")
-    if lib_override and "/" in lib_override and not Path(lib_override).is_file():
-        raise ConfigError(f"SPEAK_ESPEAK_LIB file not found: {lib_override}")
-
-    lib = lib_override or ctypes.util.find_library("espeak-ng")
-    if not lib and Path("/opt/homebrew/lib/libespeak-ng.dylib").exists():
-        lib = "/opt/homebrew/lib/libespeak-ng.dylib"
-    data = data_override or next(
-        (d for d in ESPEAK_DATA_DIRS if Path(d).is_dir()), None)
-    if not lib or not data:
-        raise ConfigError("system espeak-ng not found (apt install espeak-ng / brew install espeak-ng)")
-    return lib, data
-
-
-def _download(url: str, dest_path: Path, *, attempts: int = 3, backoff: float = 0.5) -> None:
-    """Fetch `url` into `dest_path`, retrying transient network errors.
-
-    Up to `attempts` tries with a short linear backoff between them; the destination is
-    reopened (truncated) on every attempt, so a partial write from a failed try never leaks
-    into the next one. ensure_models() still does the real correctness check (.part + exact
-    size before renaming into place) -- this only avoids treating one dropped connection as a
-    hard failure on a flaky cloud-VM network.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=30) as resp, open(dest_path, "wb") as f:
-                while chunk := resp.read(1 << 20):
-                    f.write(chunk)
-            return
-        except (urllib.error.URLError, TimeoutError) as exc:
-            last_exc = exc
-            if attempt < attempts:
-                time.sleep(backoff * attempt)
-    assert last_exc is not None
-    raise last_exc
-
-
-def ensure_models(settings: Settings, fetch: Callable[[str, Path], None] = _download) -> None:
+def model_installed(settings: Settings) -> bool:
     try:
-        settings.model_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ConfigError(f"cannot create model directory {settings.model_path.parent}: {exc}") from exc
-    for name, size in MODEL_SIZES.items():
-        dest = settings.home / "models" / name
-        if dest.is_file() and dest.stat().st_size == size:
-            continue
-        part = dest.with_name(dest.name + ".part")
-        url = f"{MODEL_BASE_URL}/{name}"
-        try:
-            fetch(url, part)
-            actual = part.stat().st_size if part.is_file() else 0
-            if actual != size:
-                raise ConfigError(
-                    f"{name} download incomplete: got {actual} bytes, expected {size}")
-        except Exception as exc:
-            if part.exists():
-                part.unlink()
-            if isinstance(exc, ConfigError):
-                raise
-            raise ConfigError(f"failed to download {name}: {exc}") from exc
-        part.rename(dest)
+        marker = json.loads((settings.model_path / ".speak-model.json").read_text())
+        return marker == {"repo": MODEL_ID, "revision": MODEL_REVISION} and all(
+            (settings.model_path / name).stat().st_size == size
+            for name, size in MANIFEST["files"].items()
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def ensure_models(settings: Settings) -> None:
+    require_mlx_platform()
+    if model_installed(settings):
+        return
+    try:
+        from huggingface_hub import snapshot_download
+
+        settings.model_path.mkdir(parents=True, exist_ok=True)
+        # HF writes resumable .incomplete files before atomic renames. Only this
+        # pinned snapshot is fetched; its bundled decoder is not a second TTS model.
+        with redirect_stdout(sys.stderr):
+            snapshot_download(
+                MODEL_ID, revision=MODEL_REVISION, local_dir=settings.model_path,
+                allow_patterns=list(MANIFEST["files"]), max_workers=2,
+            )
+        for name, size in MANIFEST["files"].items():
+            path = settings.model_path / name
+            if path.stat().st_size != size:
+                raise ConfigError(f"incomplete model file: {name}")
+            if name in MANIFEST["sha256"]:
+                with path.open("rb") as f:
+                    digest = hashlib.file_digest(f, "sha256").hexdigest()
+                if digest != MANIFEST["sha256"][name]:
+                    raise ConfigError(f"model checksum mismatch: {name}")
+        marker = settings.model_path / ".speak-model.json"
+        part = marker.with_suffix(".part")
+        part.write_text(json.dumps({"repo": MODEL_ID, "revision": MODEL_REVISION}))
+        part.replace(marker)
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError(f"Qwen3-TTS model setup failed: {exc}") from exc
 
 
 def encode_ogg(samples: np.ndarray, sample_rate: int) -> bytes:
@@ -167,37 +120,64 @@ def encode_wav(samples: np.ndarray, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
-class KokoroSynth:
-    def __init__(self, settings: Settings):
-        for path in (settings.model_path, settings.voices_path):
-            if not path.is_file():
-                raise ConfigError(f"model file missing: {path}")
-        lib, data = resolve_espeak()
-        from kokoro_onnx import Kokoro
-        from kokoro_onnx.config import EspeakConfig
+def _load_model(path: Path):
+    from mlx_audio.tts.utils import load_model
 
+    return load_model(path)
+
+
+class QwenSynth:
+    def __init__(self, settings: Settings):
+        require_mlx_platform()
+        if not model_installed(settings):
+            raise ConfigError(f"model missing or incomplete: {settings.model_path}; run speak-mcp --setup")
         self._settings = settings
+        # Local playback pipelines across threads; MLX generation must serialize.
+        self._lock = threading.Lock()
         try:
-            self._kokoro = Kokoro(str(settings.model_path), str(settings.voices_path),
-                                  espeak_config=EspeakConfig(lib_path=lib, data_path=data))
+            with redirect_stdout(sys.stderr):
+                self._model = _load_model(settings.model_path)
+            if self._model.tokenizer is None or self._model.speech_tokenizer is None:
+                raise ValueError("text tokenizer or speech decoder failed to load")
+            if settings.voice not in self.voices():
+                raise ConfigError(f"unknown voice: {settings.voice!r}; available: {', '.join(self.voices())}")
+        except ConfigError:
+            raise
         except Exception as exc:
-            raise ConfigError(f"kokoro init failed: {exc}") from exc
+            raise ConfigError(f"Qwen3-TTS init failed: {exc}") from exc
 
     @property
     def default_voice(self) -> str:
-        """The voice a call falls back to when no explicit `voice` override
-        is given (SPEAK_VOICE, or 'pf_dora'). Exposed so callers can validate
-        it against the loaded voices file the same way an explicit override
-        is validated (regression: M3)."""
         return self._settings.voice
 
     def voices(self) -> list[str]:
-        return self._kokoro.get_voices()
+        return [x.lower() for x in self._model.get_supported_speakers()]
 
     def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
-        voice = voice or self._settings.voice
-        if voice not in self._kokoro.get_voices():
+        voice = (voice or self.default_voice).lower()
+        if voice not in self.voices():
             raise ConfigError(f"unknown voice: {voice!r}")
-        lang = lang_for(voice)
-        samples, sr = self._kokoro.create(text, voice=voice, speed=self._settings.speed, lang=lang)
-        return samples, sr
+        instruct = self._settings.instruct
+        if self._settings.speed != 1.0:
+            # CustomVoice has no numerical speed control: use a pace instruction.
+            instruct += f" Speak at approximately {self._settings.speed:g} times normal pace."
+        try:
+            with self._lock, redirect_stdout(sys.stderr):
+                pieces = []
+                sample_rate = 24000
+                for result in self._model.generate_custom_voice(
+                    text=text, speaker=voice, language=self._settings.language,
+                    instruct=instruct, max_tokens=2048, verbose=False,
+                    stream=True, streaming_interval=1.0,
+                ):
+                    audio = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+                    pieces.append(audio)
+                    sample_rate = result.sample_rate
+                if not pieces:
+                    raise ValueError("no audio generated")
+                samples = np.concatenate(pieces)
+                if samples.size == 0 or not np.isfinite(samples).all() or not np.any(samples):
+                    raise ValueError("empty, silent or non-finite audio")
+                return samples, sample_rate
+        except Exception as exc:
+            raise ConfigError(f"Qwen3-TTS synthesis failed: {exc}") from exc

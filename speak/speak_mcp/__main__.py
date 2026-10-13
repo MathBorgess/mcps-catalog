@@ -13,7 +13,7 @@ from speak_mcp.clips import Clip
 from speak_mcp.errors import ConfigError
 from speak_mcp.server import make_synth, srv
 from speak_mcp.sinks import LocalSink, TelegramSink
-from speak_mcp.synth import KokoroSynth, Settings, encode_ogg, ensure_models
+from speak_mcp.synth import QwenSynth, Settings, encode_ogg, ensure_models
 
 
 def _cmd_say(text: str, voice: str | None) -> int:
@@ -43,7 +43,7 @@ def _cmd_setup() -> int:
     try:
         settings = Settings.from_env()
         ensure_models(settings)
-        KokoroSynth(settings)
+        QwenSynth(settings)
     except ConfigError as exc:
         print(f"speak-mcp: setup failed: {exc}", file=sys.stderr)
         return 1
@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample", metavar="TEXT",
                          help="synthesize to an OGG file without playing (use with --out)")
     parser.add_argument("--out", metavar="FILE", help="output path for --sample")
-    parser.add_argument("--voice", help="Kokoro voice id (default: SPEAK_VOICE or pf_dora)")
+    parser.add_argument("--voice", help="Qwen speaker id (default: SPEAK_VOICE or serena)")
     parser.add_argument("--setup", action="store_true",
                          help="download models and warm the synth, then exit")
     return parser

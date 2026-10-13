@@ -377,7 +377,7 @@ class TelegramSink:
         return SpeakResult(ok=overall_ok, sink="telegram", clips=results, message=message)
 
     def _play_one(self, index: int, clip: Clip, voice: str | None) -> ClipResult:
-        # Kokoro has a phoneme limit per call: chunk, synthesize each piece, concatenate.
+        # Bound memory per generation: chunk, synthesize each piece, concatenate.
         chunks = chunk_text(clip.text)
         pieces = []
         sr = None

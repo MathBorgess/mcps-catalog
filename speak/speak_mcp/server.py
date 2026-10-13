@@ -27,7 +27,7 @@ from speak_mcp.sinks import (
     choose_sink,
     wait_seconds_from_env,
 )
-from speak_mcp.synth import KokoroSynth, Settings, ensure_models, lang_for
+from speak_mcp.synth import QwenSynth, Settings, ensure_models
 from speak_mcp.telegram import Telegram
 
 INSTRUCTIONS = """\
@@ -35,8 +35,8 @@ When the user asks to hear, listen to, or have something said or described in \
 audio ("me fala em áudio", "read this to me", and similar), write the content \
 as spoken prose for the ear before calling a tool: no markdown, no URLs, no \
 tables or code; spell out numbers, units and acronyms the way they are spoken; \
-write in the user's language (default Portuguese voice pf_dora; pick an \
-English voice such as af_heart for English). Call `speak` for one piece of \
+write in the user's language (Portuguese by default, SPEAK_LANGUAGE controls \
+the synthesis language; voice selects timbre, not language). Call `speak` for one piece of \
 text. Call `speak_clips` for several independent parts said in sequence. Call \
 `speak_stop` to stop local playback. On the Mac this plays immediately; in \
 cloud sessions it arrives as a voice message on the owner's Telegram instead.
@@ -50,19 +50,19 @@ srv = MCPServer("speak", instructions=INSTRUCTIONS, log_level="WARNING")
 # acquire the lock twice and deadlock on the very first real tool call. See
 # the ordering note in make_sink() below (regression: F1).
 _lock = threading.Lock()
-_synth: KokoroSynth | None = None
+_synth: QwenSynth | None = None
 _sink: LocalSink | TelegramSink | None = None
 
 
-def make_synth() -> KokoroSynth:
-    """Lazily build (and cache) the process-wide Kokoro synth. Monkeypatchable in tests."""
+def make_synth() -> QwenSynth:
+    """Lazily build (and cache) the process-wide Qwen3-TTS synth. Monkeypatchable in tests."""
     global _synth
     if _synth is None:
         with _lock:
             if _synth is None:
                 settings = Settings.from_env()
                 ensure_models(settings)
-                _synth = KokoroSynth(settings)
+                _synth = QwenSynth(settings)
     return _synth
 
 
@@ -72,7 +72,7 @@ def make_sink() -> LocalSink | TelegramSink:
     global _sink
     if _sink is None:
         # Cheap, no I/O: check SPEAK_SINK *before* paying for a model
-        # download/ONNX init, so a typo'd SPEAK_SINK surfaces as its own
+        # download/MLX init, so a typo'd SPEAK_SINK surfaces as its own
         # ConfigError instead of a confusing model error.
         kind = choose_sink()
         # Build/fetch the synth *before* taking _lock: make_synth() takes the
@@ -90,14 +90,10 @@ def make_sink() -> LocalSink | TelegramSink:
     return _sink
 
 
-def _validate_voice(synth: KokoroSynth, voice: str) -> str | None:
+def _validate_voice(synth: QwenSynth, voice: str) -> str | None:
     """Eagerly validate an explicit voice override before dispatch. LocalSink's
     worker fails an unknown voice silently in the background (regression: F3),
     so the server must catch it itself before ever reaching either sink."""
-    try:
-        lang_for(voice)
-    except ConfigError as exc:
-        return str(exc)
     if voice not in synth.voices():
         return f"unknown voice: {voice!r}"
     return None

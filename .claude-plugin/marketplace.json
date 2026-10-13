@@ -9,13 +9,13 @@
     {
       "name": "speak",
       "source": "./speak",
-      "description": "Text-to-speech: Kokoro TTS plays locally on the Mac, Telegram voice messages from cloud sessions.",
+      "description": "Qwen3-TTS 1.7B MLX 4-bit: Portuguese speech, local playback or Telegram from Apple Silicon.",
       "category": "productivity",
       "keywords": [
         "tts",
         "text-to-speech",
         "audio",
-        "kokoro",
+        "qwen3-tts",
         "telegram",
         "voice"
       ]

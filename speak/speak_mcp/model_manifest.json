@@ -1,0 +1,22 @@
+{
+  "repo": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-4bit",
+  "revision": "f35faf19b0cc2160865af64ecf0f22f83d335135",
+  "files": {
+    "config.json": 6058,
+    "generation_config.json": 245,
+    "merges.txt": 1671839,
+    "model.safetensors": 1625226859,
+    "model.safetensors.index.json": 71786,
+    "preprocessor_config.json": 127,
+    "speech_tokenizer/config.json": 2336,
+    "speech_tokenizer/configuration.json": 76,
+    "speech_tokenizer/model.safetensors": 682293092,
+    "speech_tokenizer/preprocessor_config.json": 234,
+    "tokenizer_config.json": 7344,
+    "vocab.json": 2776833
+  },
+  "sha256": {
+    "model.safetensors": "45a5b5ccd3cc473b9d3890ea922937036b56b948e8bd8c678e725329abdd1d00",
+    "speech_tokenizer/model.safetensors": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+  }
+}
