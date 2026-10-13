@@ -2,7 +2,7 @@
 
 Fakes are in-process and instantaneous: no real audio playback, no network,
 no models. `make_sink`/`make_synth` are monkeypatched on the server module so
-tool bodies never build a real KokoroSynth/LocalSink/TelegramSink. The stdio
+tool bodies never build a real QwenSynth/LocalSink/TelegramSink. The stdio
 `initialize` handshake test is the one real subprocess/protocol exercise;
 it never plays audio (no `--say`) and only checks the handshake response.
 """
@@ -21,7 +21,7 @@ from speak_mcp import server
 from speak_mcp import sinks as sinks_module
 from speak_mcp.errors import ConfigError
 from speak_mcp.sinks import ClipResult, SpeakResult
-from speak_mcp.synth import MODEL, VOICES_FILE
+from speak_mcp.synth import Settings, model_installed
 
 
 class FakeSink:
@@ -44,10 +44,10 @@ class FakeSink:
 
 
 class FakeSynth:
-    """Exposes just enough of KokoroSynth's surface for voice validation
-    (lang_for is a free function in synth.py, exercised directly)."""
+    """Exposes just enough of QwenSynth's surface for voice validation
+    (language is configured independently of the timbre)."""
 
-    def __init__(self, voices=("pf_dora", "af_heart", "bf_alice"), default_voice="pf_dora"):
+    def __init__(self, voices=("serena", "ryan", "aiden"), default_voice="serena"):
         self._voices = list(voices)
         self.default_voice = default_voice
 
@@ -105,7 +105,7 @@ def test_speak_happy_path(monkeypatch):
     fake = FakeSink()
     monkeypatch.setattr(server, "make_sink", lambda: fake)
     monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
-    res = _call("speak", {"text": "ola mundo", "title": "titulo", "voice": "pf_dora"})
+    res = _call("speak", {"text": "ola mundo", "title": "titulo", "voice": "serena"})
     assert res.is_error is False
     assert res.structured_content["ok"] is True
     assert res.structured_content["sink"] == "local"
@@ -113,7 +113,7 @@ def test_speak_happy_path(monkeypatch):
     clips, voice, note = fake.play_calls[0]
     assert [c.text for c in clips] == ["ola mundo"]
     assert clips[0].caption == "titulo"
-    assert voice == "pf_dora"
+    assert voice == "serena"
     assert note is None
 
 
@@ -137,13 +137,13 @@ def test_speak_clips_happy_path(monkeypatch):
     res = _call("speak_clips", {
         "clips": [{"text": "um"}, {"text": "dois", "caption": "c2"}],
         "note": "nota",
-        "voice": "af_heart",
+        "voice": "ryan",
     })
     assert res.structured_content["ok"] is True
     clips, voice, note = fake.play_calls[0]
     assert [c.text for c in clips] == ["um", "dois"]
     assert clips[1].caption == "c2"
-    assert voice == "af_heart"
+    assert voice == "ryan"
     assert note == "nota"
 
 
@@ -383,14 +383,14 @@ def test_make_sink_does_not_deadlock_on_first_real_call(monkeypatch):
                          type("FakeSettingsCls", (), {"from_env": classmethod(lambda cls: FakeSettings())}))
     monkeypatch.setattr(server, "ensure_models", lambda settings: None)
 
-    class FakeKokoroSynth:
+    class FakeQwenSynth:
         def __init__(self, settings):
             self._settings = settings
 
         def voices(self):
             return []
 
-    monkeypatch.setattr(server, "KokoroSynth", FakeKokoroSynth)
+    monkeypatch.setattr(server, "QwenSynth", FakeQwenSynth)
 
     class NoOpPlayer:
         """LocalSink's default player, replaced so nothing can ever play."""
@@ -423,7 +423,7 @@ def test_make_sink_does_not_deadlock_on_first_real_call(monkeypatch):
 def test_speak_invalid_speak_sink_never_builds_synth(monkeypatch):
     """Regression (fix round 2): make_sink() must check choose_sink() --
     cheap, env-only -- *before* calling make_synth() -- a full model
-    download/ONNX init. Otherwise a typo'd SPEAK_SINK pays for a model build
+    download/MLX init. Otherwise a typo'd SPEAK_SINK pays for a model build
     first and its ConfigError would surface as a confusing model error
     instead of the actual SPEAK_SINK message. Uses the real choose_sink()
     (via SPEAK_SINK in the environment) and the real make_sink(), with
@@ -478,19 +478,19 @@ def test_speak_known_voice_passes_validation(monkeypatch):
     fake = FakeSink()
     monkeypatch.setattr(server, "make_sink", lambda: fake)
     monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)
-    res = _call("speak", {"text": "ola", "voice": "af_heart"})
+    res = _call("speak", {"text": "ola", "voice": "ryan"})
     assert res.structured_content["ok"] is True
     assert len(fake.play_calls) == 1
 
 
 def test_speak_default_voice_is_validated_when_none_given(monkeypatch):
     """Regression M3: the default voice (synth.default_voice, i.e. SPEAK_VOICE
-    or 'pf_dora') must be validated against the loaded voices the same way an
+    or 'serena') must be validated against the loaded voices the same way an
     explicit override is -- otherwise a bad SPEAK_VOICE only fails silently
     deep inside the sink's worker (the same class of bug F3 fixed for
     explicit voices) instead of a clean ok:false from the server."""
     fake = FakeSink()
-    bad_default = FakeSynth(voices=("af_heart", "bf_alice"), default_voice="pz_unknown")
+    bad_default = FakeSynth(voices=("ryan", "aiden"), default_voice="pz_unknown")
     monkeypatch.setattr(server, "make_sink", lambda: fake)
     monkeypatch.setattr(server, "make_synth", lambda: bad_default)
     res = _call("speak", {"text": "ola"})
@@ -501,7 +501,7 @@ def test_speak_default_voice_is_validated_when_none_given(monkeypatch):
 
 def test_speak_clips_default_voice_is_validated_when_none_given(monkeypatch):
     fake = FakeSink()
-    bad_default = FakeSynth(voices=("af_heart", "bf_alice"), default_voice="pz_unknown")
+    bad_default = FakeSynth(voices=("ryan", "aiden"), default_voice="pz_unknown")
     monkeypatch.setattr(server, "make_sink", lambda: fake)
     monkeypatch.setattr(server, "make_synth", lambda: bad_default)
     res = _call("speak_clips", {"clips": [{"text": "ola"}]})
@@ -515,7 +515,7 @@ def test_speak_valid_default_voice_reaches_sink(monkeypatch):
     validation-correctness one."""
     fake = FakeSink()
     monkeypatch.setattr(server, "make_sink", lambda: fake)
-    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)  # default_voice="pf_dora" is loaded
+    monkeypatch.setattr(server, "make_synth", lambda: DEFAULT_SYNTH)  # default_voice="serena" is loaded
     res = _call("speak", {"text": "ola"})
     assert res.structured_content["ok"] is True
     assert len(fake.play_calls) == 1
@@ -637,16 +637,15 @@ def _jsonrpc_read_until_id(stdout, target_id: int, timeout: float) -> list[dict]
 
 
 @pytest.mark.skipif(
-    not (Path(REAL_SPEAK_HOME, "models", MODEL).exists()
-         and Path(REAL_SPEAK_HOME, "models", VOICES_FILE).exists()),
-    reason="Kokoro model not installed under SPEAK_HOME",
+    not model_installed(Settings.from_env({"SPEAK_HOME": REAL_SPEAK_HOME})),
+    reason="Qwen3-TTS model not installed under SPEAK_HOME",
 )
 def test_stdio_stays_protocol_clean_through_real_model_load_telegram_sink():
     """F4: starts the real stdio server with SPEAK_SINK=telegram and bogus
     TELEGRAM_* credentials, completes initialize, then calls speak_stop.
     speak_stop routes through the real make_sink() -> make_synth() ->
-    KokoroSynth(settings), so this loads the real ONNX model -- exactly the
-    scenario where a C-extension (onnxruntime/kokoro) could print a stray
+    QwenSynth(settings), so this loads the real MLX model -- exactly the
+    scenario where a C-extension (mlx) could print a stray
     line onto stdout and corrupt the MCP protocol stream. TelegramSink.stop()
     itself is a pure no-op (never calls the Telegram API), so this never
     touches the network, and nothing here ever plays audio.
@@ -678,8 +677,8 @@ def test_stdio_stays_protocol_clean_through_real_model_load_telegram_sink():
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "speak_stop", "arguments": {}},
         })
-        # Generous timeout: this is a real model load (ONNX session init), not a fake.
-        call_messages = _jsonrpc_read_until_id(proc.stdout, target_id=2, timeout=60.0)
+        # Generous timeout: this is a real model load (MLX session init), not a fake.
+        call_messages = _jsonrpc_read_until_id(proc.stdout, target_id=2, timeout=180.0)
         call_response = call_messages[-1]
         assert "result" in call_response, call_response
         structured = call_response["result"].get("structuredContent")

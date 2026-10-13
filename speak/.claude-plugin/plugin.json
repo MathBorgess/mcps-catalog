@@ -1,7 +1,7 @@
 {
   "name": "speak",
-  "version": "0.1.2",
-  "description": "Text-to-speech MCP server: Kokoro TTS plays locally on the Mac, and sends Telegram voice messages from cloud sessions.",
+  "version": "0.2.0",
+  "description": "Qwen3-TTS 1.7B MLX 4-bit on Apple Silicon: Portuguese speech, local playback or Telegram.",
   "author": {
     "name": "Matheus Borges",
     "url": "https://github.com/MathBorgess"
@@ -12,7 +12,11 @@
   "mcpServers": {
     "speak": {
       "command": "uvx",
-      "args": ["--from", "${CLAUDE_PLUGIN_ROOT}", "speak-mcp"]
+      "args": [
+        "--from",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "speak-mcp"
+      ]
     }
   }
 }

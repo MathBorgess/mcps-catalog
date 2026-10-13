@@ -4,7 +4,7 @@ A public catalog of **[Matheus Borges](https://github.com/MathBorgess)**'s MCP s
 
 | Plugin | What | Where it runs |
 |---|---|---|
-| [`speak`](speak/) | Text → speech (Kokoro-82M, pt-BR by default). Plays on the Mac; sends Telegram voice messages from cloud sessions. | macOS (local) and the Claude Code cloud VM (Ubuntu 24.04 x86_64) |
+| [`speak`](speak/) | Text → speech (Qwen3-TTS 1.7B MLX 4-bit, Portuguese by default). Local playback or Telegram from the Mac. | macOS Apple Silicon |
 | [`ultrafast-browser`](ultrafast-browser/) | The Laya browser-use MCP (`laya-mcp`) from [ultrafast-browser-mcp](https://github.com/MathBorgess/ultrafast-browser-mcp), vendored as a git submodule to pin the version. | macOS only (depends on Apple MLX and a local Chrome) |
 | [`laya-computer`](laya-computer/) | Execute structured desktop plans with local Laya decisions and Cua Driver; caller-owned rescue. | macOS on Apple Silicon; Cua Driver required |
 
@@ -28,52 +28,13 @@ Or, from inside a session:
 
 This repo is not on Anthropic's official listing, so `claude plugin marketplace add` points straight at the GitHub repo. Update later with `claude plugin marketplace update mathborgess-mcps` and `claude plugin update <name>@mathborgess-mcps`.
 
-Prerequisites: **`uv`** (`brew install uv`, or see [astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/)) — every plugin here runs via `uvx`, so it must be on `PATH` for Claude Code to launch them. macOS prerequisite for `speak`: **`brew install espeak-ng`**. The pip-bundled `espeakng-loader` has a hard-coded data path and is not used; a system espeak-ng install is what `speak` actually links against. `ultrafast-browser` needs macOS on Apple Silicon, a local Chrome reachable over remote debugging, and its own upstream `.env` — see [`ultrafast-browser/README.md`](ultrafast-browser/README.md).
+Prerequisites: **`uv`** on PATH. `speak` uses MLX and requires macOS Apple Silicon; no espeak-ng or ONNX runtime is needed. `ultrafast-browser` needs macOS on Apple Silicon, Chrome remote debugging, and its upstream `.env` — see its README.
 
 ## speak
 
-See [`speak/README.md`](speak/README.md) for the full reference (tools, env vars, sinks, models, CLI, testing). Three tools: `speak(text, title?, voice?)` for one piece of text, `speak_clips(clips, note?, voice?)` for a sequence of independent clips, `speak_stop()` to stop local playback. The server's own MCP instructions tell the model to write spoken prose for the ear (no markdown, no URLs, numbers spelled out) and call `speak`/`speak_clips`, so day to day you just ask in plain language:
+See [`speak/README.md`](speak/README.md) for tools, configuration, the pinned model, and testing. The tools remain `speak(text, title?, voice?)`, `speak_clips(clips, note?, voice?)`, and `speak_stop()`. Write spoken prose, then request audio in plain language. Portuguese is the default; `SPEAK_LANGUAGE` selects language independently of the speaker timbre.
 
-> "me fala em áudio o resumo dessa PR"
-> "read this back to me"
-
-Locally on the Mac it plays right away through `afplay` (or `paplay`/`aplay` on Linux). In a cloud session it sends a Telegram voice message to the owner instead — same tools, the server picks the sink from the environment.
-
-### Environment variables
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `SPEAK_SINK` | unset → `telegram` if `CLAUDE_CODE_REMOTE_SESSION_ID`/`CLAUDE_CODE_REMOTE` is set, else `local` | `local` or `telegram`, overrides the auto-detection |
-| `SPEAK_VOICE` | `pf_dora` | Kokoro voice id; its first letter picks the language (`p`→pt-br, `a`→en-us, `b`→en-gb, `e`→es, `f`→fr-fr, `i`→it, `j`→ja, `z`→cmn, `h`→hi) |
-| `SPEAK_SPEED` | `1.0` | `0.7`–`1.5` |
-| `SPEAK_HOME` | `/opt/speak` if that directory exists, else `~/.cache/speak-mcp` | models live in `<home>/models/` |
-| `SPEAK_WAIT_SECONDS` | `45` | `telegram` sink only: how long a call waits for delivery before answering `queued: true` (`0`–`3600`; keep it under the client's 60s tool timeout) |
-| `TELEGRAM_BOT_TOKEN` | — | required for the `telegram` sink |
-| `TELEGRAM_CHAT_ID` | — | required for the `telegram` sink |
-| `SPEAK_ESPEAK_LIB` | auto-detected | override the espeak-ng shared library path |
-| `SPEAK_ESPEAK_DATA` | auto-detected | override the espeak-ng data directory |
-
-Missing env, a missing model, or missing espeak-ng never crash the server — every tool call comes back as a normal result with `ok: false`. The Kokoro model (`kokoro-v1.0.int8.onnx` + `voices-v1.0.bin`, ~140 MB total) downloads on first use into `SPEAK_HOME/models`.
-
-### Cloud sessions
-
-Cloud sessions don't install plugins, so [`cloud/setup.sh`](cloud/setup.sh) provisions and registers `speak` there instead. Paste the whole file into the environment's **Settings → Environment → Setup script**, and add to that same environment:
-
-- **`api.telegram.org`** in the allowed domains (Custom, on top of the defaults) — without it `speak` has no way to reach the Telegram API.
-- The **`TELEGRAM_BOT_TOKEN`** and **`TELEGRAM_CHAT_ID`** environment variables.
-
-The script installs `espeak-ng`, builds a venv at `/opt/speak/venv` with the `speak` package from this repo, downloads the models, and runs `claude mcp add --scope user speak ...`. It installs from `git+https://github.com/MathBorgess/mcps-catalog@${SPEAK_REF}`, and `SPEAK_REF` defaults to `main` — so pasting the script as-is only works once the change is merged to `main`; while testing a branch or PR, set `SPEAK_REF` (in the environment, alongside the two `TELEGRAM_*` variables) to that branch or commit before running the setup script. If a session ever starts without that registration having survived, add a per-repo `.mcp.json` as a fallback:
-
-```json
-{
-  "mcpServers": {
-    "speak": {
-      "command": "/opt/speak/venv/bin/speak-mcp",
-      "env": { "SPEAK_HOME": "/opt/speak", "SPEAK_SINK": "telegram" }
-    }
-  }
-}
-```
+The previous Linux cloud setup is retired because MLX requires Apple Silicon. [`cloud/setup.sh`](cloud/setup.sh) is now a non-mutating explanatory no-op. Existing Linux deployments are not automatically upgraded. Telegram delivery remains available when the server runs on a Mac with `SPEAK_SINK=telegram` and its credentials supplied through the environment.
 
 ## Security notes
 

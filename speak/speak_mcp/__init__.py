@@ -1,1 +1,1 @@
-"""speak-mcp: text-to-speech MCP server (Kokoro locally, Telegram voice from cloud sessions)."""
+"""speak-mcp: Qwen3-TTS 1.7B MLX 4-bit, local playback or Telegram."""

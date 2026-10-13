@@ -1,5 +1,7 @@
 # mcps-catalog — design
 
+> Speak backend and cloud provisioning sections superseded on 2026-10-13 by [the Qwen3-TTS migration](2026-10-13-speak-qwen3-mlx.md). Historical Kokoro details below describe the original implementation.
+
 Status: approved by the owner on 2026-09-28. Origin: the RADAR audio work in the owner's private vault (PR MathBorgess/mathai-wiki#153), generalized so any Claude Code session — local or cloud — can "say it in audio", and so the owner's MCP servers live in one public catalog.
 
 ## 1. Goal
